@@ -2,12 +2,12 @@ from __future__ import annotations
 import logging
 import secrets
 from urllib.parse import urlencode
-from fastapi import APIRouter, Depends, Response, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import get_session
+from ..db import SessionLocal, get_session
 from ..models import User, Session, GithubOAuthToken
 from ..config import settings
 from ..services.github_oauth import exchange_code_for_token, fetch_github_user, GithubOAuthError
@@ -92,15 +92,16 @@ async def github_auth_callback(
     return res
 
 
-async def current_user(request: Request, session: AsyncSession = Depends(get_session)) -> User:
+async def current_user(request: Request) -> User:
     token = request.cookies.get("aura_session")
     if not token:
         raise HTTPException(status_code=401, detail="unauthorized")
-    sess = (await session.execute(select(Session).where(Session.token == token))).scalar_one_or_none()
-    if not sess:
-        raise HTTPException(status_code=401, detail="unauthorized")
-    user = (await session.execute(select(User).where(User.id == sess.user_id))).scalar_one()
-    return user
+    async with SessionLocal() as session:
+        sess = (await session.execute(select(Session).where(Session.token == token))).scalar_one_or_none()
+        if not sess:
+            raise HTTPException(status_code=401, detail="unauthorized")
+        user = (await session.execute(select(User).where(User.id == sess.user_id))).scalar_one()
+        return user
 
 
 @router.get("/me")

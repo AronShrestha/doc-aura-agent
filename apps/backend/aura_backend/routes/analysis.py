@@ -1,21 +1,26 @@
 from __future__ import annotations
+
 import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import NoResultFound
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import get_session
-from ..models import GithubInstallation, GithubOAuthToken, Repo, AnalysisRun, DocSection, Artifact, ArtifactEdge, GeneratedDoc, PullRequest, PrAnalysisRun, DocDiff
-from ..schemas import AnalyzeRepoRequest, AnalyzeRepoResponse, RunResponse, SearchRequest, DocSectionResponse, GeneratedDocResponse
+from ..config import settings
+from ..db import SessionLocal, get_session
+from ..models import AnalysisRun, Artifact, ArtifactEdge, DocDiff, GeneratedDoc, GithubInstallation, GithubOAuthToken, PrAnalysisRun, PullRequest, Repo
 from ..routes.auth import current_user
+from ..schemas import AnalyzeRepoRequest, AnalyzeRepoResponse, DocSectionResponse, GeneratedDocResponse, RunResponse, SearchRequest
 from ..services.github_app import (
     GithubAppError,
     build_app_jwt,
     create_installation_token,
     list_installation_repositories,
 )
+from ..services.github_prs import create_or_update_docs_followup_pr, post_or_update_review_comment
 from ..services.github_oauth import list_user_repositories
-from ..config import settings
+from ..services.pr_analysis import analyze_pull_request
 
 router = APIRouter(prefix="/api/v1", tags=["analysis"])
 logger = logging.getLogger(__name__)
@@ -303,13 +308,51 @@ async def pr_list(repo_id: int, user=Depends(current_user), session: AsyncSessio
     }
 
 
+@router.post("/pull-requests/{pull_request_id}/analyze")
+async def pr_analyze(pull_request_id: int, user=Depends(current_user)):
+    logger.info("manual pr analysis requested", extra={"pr_id": pull_request_id, "event": "pr_analyze"})
+    try:
+        await analyze_pull_request(SessionLocal, pull_request_id)
+        await post_or_update_review_comment(SessionLocal, pull_request_id)
+    except NoResultFound as exc:
+        raise HTTPException(status_code=404, detail="pull_request_not_found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="pr_analysis_failed") from exc
+
+    async with SessionLocal() as session:
+        run = (
+            await session.execute(
+                select(PrAnalysisRun).where(PrAnalysisRun.pull_request_id == pull_request_id).order_by(PrAnalysisRun.id.desc())
+            )
+        ).scalars().first()
+    if not run:
+        raise HTTPException(status_code=404, detail="pr_analysis_not_found")
+    return _serialize_pr_analysis_run(run)
+
+
 @router.get("/pull-requests/{pull_request_id}/impact")
 async def pr_impact(pull_request_id: int, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
     logger.debug("pr impact requested", extra={"pr_id": pull_request_id, "event": "pr_impact"})
     run = (await session.execute(select(PrAnalysisRun).where(PrAnalysisRun.pull_request_id == pull_request_id).order_by(PrAnalysisRun.id.desc()))).scalars().first()
     if not run:
         raise HTTPException(status_code=404, detail="pr_analysis_not_found")
-    return {"pr_analysis_run_id": run.id, "status": run.status, "impact_summary": run.impact_summary, "review_comment_body": run.review_comment_body, "error": run.error}
+    return _serialize_pr_analysis_run(run)
+
+
+@router.post("/pull-requests/{pull_request_id}/documentation-pr")
+async def pr_documentation_pr(pull_request_id: int, user=Depends(current_user)):
+    logger.info("manual docs follow-up requested", extra={"pr_id": pull_request_id, "event": "pr_docs_followup"})
+    try:
+        result = await create_or_update_docs_followup_pr(SessionLocal, pull_request_id)
+    except NoResultFound as exc:
+        raise HTTPException(status_code=404, detail="pull_request_not_found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="docs_followup_failed") from exc
+    return result
 
 
 @router.get("/pull-requests/{pull_request_id}/doc-diff")
@@ -347,3 +390,13 @@ def _diataxis_for_category(category: str) -> str:
     if category == "config":
         return "how-to"
     return "reference"
+
+
+def _serialize_pr_analysis_run(run: PrAnalysisRun) -> dict:
+    return {
+        "pr_analysis_run_id": run.id,
+        "status": run.status,
+        "impact_summary": run.impact_summary,
+        "review_comment_body": run.review_comment_body,
+        "error": run.error,
+    }

@@ -1,0 +1,188 @@
+{
+  "docs": {
+    "0ca98dfe41e2f141": {
+      "category": "data_model",
+      "content_hash": "3464428bb8e4e8450ab4f88df1c94cf00215446445868f74f1f41f2b3ffe84f0",
+      "path": ".aura/docs/data-models/stockker-models-schemas-priceupdate.md",
+      "source_files": [
+        "stockker/models/schemas.py"
+      ],
+      "title": "stockker.models.schemas.PriceUpdate"
+    },
+    "18f55d1c7e8eab4e": {
+      "category": "env_var",
+      "content_hash": "60cdf89fef53598ac532c8607a6250d73add130915365650865d214da1ac4f08",
+      "path": ".aura/docs/env-vars/authorized-tokens.md",
+      "source_files": [
+        "stockker/config.py"
+      ],
+      "title": "AUTHORIZED_TOKENS"
+    },
+    "192f35a8ee7d9cc4": {
+      "category": "env_var",
+      "content_hash": "2fdb39a56e97a947914925ff334badbf29a064c46cad7982a6e66c80502ad048",
+      "path": ".aura/docs/env-vars/secret-key.md",
+      "source_files": [
+        "stockker/config.py"
+      ],
+      "title": "SECRET_KEY"
+    },
+    "29f43e93722fd15a": {
+      "category": "data_model",
+      "content_hash": "29936c4240520a18805361ce0cc0a4643bd103b2ddc310857f84dbefe18030fa",
+      "path": ".aura/docs/data-models/stockker-models-schemas-userresponse.md",
+      "source_files": [
+        "stockker/models/schemas.py"
+      ],
+      "title": "stockker.models.schemas.UserResponse"
+    },
+    "46220a9449527854": {
+      "category": "config",
+      "content_hash": "ef60966c9fda89b66e157bedf34c5a63687842a592d26af2eb20b7eca4f5e10b",
+      "path": ".aura/docs/config/docker-compose-yml.md",
+      "source_files": [
+        "docker-compose.yml"
+      ],
+      "title": "docker-compose.yml"
+    },
+    "4d152b14e23856a1": {
+      "category": "data_model",
+      "content_hash": "a6ebc47b3ef9c490df20e1c21074abf6cb0fa68cc6ca0278738ec0ca6fd8e903",
+      "path": ".aura/docs/data-models/stockker-models-schemas-stockcreate.md",
+      "source_files": [
+        "stockker/models/schemas.py"
+      ],
+      "title": "stockker.models.schemas.StockCreate"
+    },
+    "5db3a71af0e6065c": {
+      "category": "data_model",
+      "content_hash": "4454daca8b4cce6abdef2f9c1d75ecd5792de4a30a15ee6f06bf9e5ff6d48752",
+      "path": ".aura/docs/data-models/stockker-models-schemas-stockresponse.md",
+      "source_files": [
+        "stockker/models/schemas.py"
+      ],
+      "title": "stockker.models.schemas.StockResponse"
+    },
+    "6aac49a831c2331f": {
+      "category": "env_var",
+      "content_hash": "09d77a854c765e2d43a9705fc8065c17ddd5ad484e45d80da2195d6954118d9f",
+      "path": ".aura/docs/env-vars/database-url.md",
+      "source_files": [
+        "stockker/config.py"
+      ],
+      "title": "DATABASE_URL"
+    },
+    "787983610b768cad": {
+      "category": "architecture",
+      "content_hash": "c8be95b4abe5bbb42e529ec702a3bce99b5c060ed285143c8deb394435f008e5",
+      "path": ".aura/docs/architecture/overview.md",
+      "source_files": [],
+      "title": "Architecture Overview"
+    },
+    "79e3763389712fb4": {
+      "category": "config",
+      "content_hash": "37cba076b1656ce6c362aa2ef5c86fa7aa497acc350a70f2e7e2b51ecedf73ee",
+      "path": ".aura/docs/config/dockerfile.md",
+      "source_files": [
+        "Dockerfile"
+      ],
+      "title": "Dockerfile"
+    },
+    "82eca0eae6f06a2a": {
+      "category": "function",
+      "content_hash": "252e6a73ba064f30f961f407b36465215231358c31ad8c13aea628d053ca0382",
+      "path": ".aura/docs/functions/create-app.md",
+      "source_files": [
+        "stockker/__init__.py"
+      ],
+      "title": "Creating the Application"
+    },
+    "a68c803b00c484b8": {
+      "category": "module",
+      "content_hash": "257a32b4894974eff4af933b56da245c418b39344002f550e781929e581c6871",
+      "path": ".aura/docs/modules/api-endpoints.md",
+      "source_files": [
+        "stockker/routes/api.py"
+      ],
+      "title": "API Endpoints"
+    },
+    "abdb1881ccf88d99": {
+      "category": "report",
+      "content_hash": "e2dfb078a4f8b32e697ea121fbb7017b7c7561906964b7939f650a7e82615c7e",
+      "path": ".aura/docs/reports/missing-docs.md",
+      "source_files": [],
+      "title": "Missing Documentation Report"
+    },
+    "b14e00b70b2eba2a": {
+      "category": "data_model",
+      "content_hash": "fc1ca4c1c41d9f9e28aee1fa1c595b650b08f1fcd547dcd58684b7a145fa3c00",
+      "path": ".aura/docs/data-models/stockker-models-schemas-stockupdate.md",
+      "source_files": [
+        "stockker/models/schemas.py"
+      ],
+      "title": "stockker.models.schemas.StockUpdate"
+    },
+    "b7e98cd7e4d85aa2": {
+      "category": "data_model",
+      "content_hash": "061a1c335d672ab77be3226f33337ef299e7a5ffe658177e284de5ca7439e1f3",
+      "path": ".aura/docs/data-models/overview.md",
+      "source_files": [
+        "stockker/models/schemas.py"
+      ],
+      "title": "Data Models"
+    },
+    "c83532526467636f": {
+      "category": "module",
+      "content_hash": "32d38282e7179df8a33ff8cc9d19b0cb1eb816d7051ecd1dc28503e101cc4775",
+      "path": ".aura/docs/modules/auth-flow.md",
+      "source_files": [
+        "stockker/routes/auth.py"
+      ],
+      "title": "Authentication Flow"
+    },
+    "d73e68e2ed64b77b": {
+      "category": "data_model",
+      "content_hash": "bd274f80d63a9334274d35de382e8fe9e93b1f177aa6fcf083af9b1be1558c7e",
+      "path": ".aura/docs/data-models/stockker-models-schemas-userlogin.md",
+      "source_files": [
+        "stockker/models/schemas.py"
+      ],
+      "title": "stockker.models.schemas.UserLogin"
+    },
+    "e72d7e4a9d12b67e": {
+      "category": "data_model",
+      "content_hash": "c5027c93aa9adb9420cdc6487470ca6cabe8914bbb5bc20219358f3432638eeb",
+      "path": ".aura/docs/data-models/stockker-models-schemas-userregister.md",
+      "source_files": [
+        "stockker/models/schemas.py"
+      ],
+      "title": "stockker.models.schemas.UserRegister"
+    },
+    "ecca15165bdf6d28": {
+      "category": "project",
+      "content_hash": "a0af761c737fe4ed335d398be7f8d3d209d3130ee5dfdb3c55b683ae803d209f",
+      "path": ".aura/docs/project-overview.md",
+      "source_files": [],
+      "title": "Project Overview"
+    },
+    "f2528773e47b49c0": {
+      "category": "data_model",
+      "content_hash": "d78033268c0670e1bb51c7108b366dd3198a8c7af8a27cd8aa3e2cf062ce1ca4",
+      "path": ".aura/docs/data-models/stockker-models-schemas-portfolioresponse.md",
+      "source_files": [
+        "stockker/models/schemas.py"
+      ],
+      "title": "stockker.models.schemas.PortfolioResponse"
+    },
+    "index": {
+      "category": "index",
+      "content_hash": "2226b459326961872392d567bc797eb7d475b1ffd23b9d7e8c0c8d9e0e83d10e",
+      "path": ".aura/docs/index.md",
+      "source_files": [],
+      "title": "Documentation Index"
+    }
+  },
+  "generated_at": "2026-05-06T04:20:29.010052+00:00",
+  "repo_id": 1,
+  "repo_sha": "main"
+}

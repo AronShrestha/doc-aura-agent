@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from aura_backend.analysis.agents import orchestrator as orchestrator_module
 from aura_backend.analysis.agents.orchestrator import run_documentation_agents
 from aura_backend.analysis.agents.planner import run_doc_planner_agent
 from aura_backend.analysis.agents.vlm_context import run_vlm_context_agent
@@ -92,8 +93,9 @@ async def test_vlm_enabled_sends_repo_media(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_verifier_failure_blocks_agent_workflow(tmp_path):
+async def test_verifier_failure_blocks_agent_workflow(tmp_path, monkeypatch):
     snapshot = _snapshot(tmp_path)
+    monkeypatch.setattr(orchestrator_module._settings, "verifier_enabled", True)
     with pytest.raises(RuntimeError, match="agent_verification_failed"):
         await run_documentation_agents(
             snapshot,
