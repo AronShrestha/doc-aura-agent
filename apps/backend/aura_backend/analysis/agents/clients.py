@@ -31,6 +31,7 @@ class OpenAIChatClient:
 
     async def complete(self, messages: list[dict[str, Any]], *, max_tokens: int | None = None, temperature: float = 0.2) -> str:
         import asyncio
+        import json
         import os
 
         # Demo replay mode — never hit the network. Returns a deterministic
@@ -67,52 +68,89 @@ class OpenAIChatClient:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": chosen_max,
+            "stream": True,
         }
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+
+        # Granular timeouts: read = max idle gap between chunks (not total
+        # response time). Streaming means slow generation no longer trips a
+        # whole-response timeout.
+        timeout = httpx.Timeout(
+            connect=10.0,
+            read=float(self.timeout_seconds),
+            write=30.0,
+            pool=10.0,
+        )
 
         max_attempts = 4
         backoff = 2.0
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                    resp = await client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
-                    if resp.status_code >= 500 or resp.status_code == 429:
-                        logger.warning(
-                            "llm transient error",
-                            extra={"event": "llm_retry", "status": resp.status_code, "attempt": attempt, "body": resp.text[:500]},
-                        )
-                        if attempt < max_attempts:
-                            await asyncio.sleep(backoff * attempt)
-                            continue
-                    if resp.status_code >= 400:
-                        body = resp.text
-                        # 400 from vLLM most often = unknown model OR
-                        # context overflow. Surface body in the exception
-                        # itself so callers see why instead of just '400'.
-                        logger.error(
-                            "llm request failed",
-                            extra={
-                                "event": "llm_error",
-                                "status": resp.status_code,
-                                "model": self.model,
-                                "url": f"{self.base_url}/chat/completions",
-                                "input_tokens_est": approx_input_tokens,
-                                "max_tokens": chosen_max,
-                                "body": body[:2000],
-                            },
-                        )
-                        raise RuntimeError(
-                            f"llm_{resp.status_code}: model={self.model!r} "
-                            f"input_tokens~{approx_input_tokens} max_tokens={chosen_max} "
-                            f"body={body[:500]}"
-                        )
-                    resp.raise_for_status()
-                    data = resp.json()
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{self.base_url}/chat/completions",
+                        headers=headers,
+                        json=payload,
+                    ) as resp:
+                        if resp.status_code >= 400:
+                            body = (await resp.aread()).decode("utf-8", "replace")
+                            if resp.status_code >= 500 or resp.status_code == 429:
+                                logger.warning(
+                                    "llm transient error",
+                                    extra={"event": "llm_retry", "status": resp.status_code, "attempt": attempt, "body": body[:500]},
+                                )
+                                if attempt < max_attempts:
+                                    await asyncio.sleep(backoff * attempt)
+                                    continue
+                            # 400 from vLLM most often = unknown model OR
+                            # context overflow. Surface body in the exception
+                            # itself so callers see why instead of just '400'.
+                            logger.error(
+                                "llm request failed",
+                                extra={
+                                    "event": "llm_error",
+                                    "status": resp.status_code,
+                                    "model": self.model,
+                                    "url": f"{self.base_url}/chat/completions",
+                                    "input_tokens_est": approx_input_tokens,
+                                    "max_tokens": chosen_max,
+                                    "body": body[:2000],
+                                },
+                            )
+                            raise RuntimeError(
+                                f"llm_{resp.status_code}: model={self.model!r} "
+                                f"input_tokens~{approx_input_tokens} max_tokens={chosen_max} "
+                                f"body={body[:500]}"
+                            )
+
+                        chunks: list[str] = []
+                        async for line in resp.aiter_lines():
+                            if not line or not line.startswith("data:"):
+                                continue
+                            data_str = line[5:].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data_str)
+                            except json.JSONDecodeError:
+                                logger.warning(
+                                    "llm stream malformed chunk",
+                                    extra={"event": "llm_stream_parse_error", "line": data_str[:200]},
+                                )
+                                continue
+                            choices = chunk.get("choices") or []
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta") or {}
+                            piece = delta.get("content")
+                            if piece:
+                                chunks.append(piece)
                 logger.info("llm request succeeded", extra={"event": "llm_response", "attempt": attempt})
-                return data["choices"][0]["message"]["content"]
+                return "".join(chunks)
             except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
                 last_exc = exc
                 logger.warning("llm network error", extra={"event": "llm_retry", "attempt": attempt, "error": str(exc)})

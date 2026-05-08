@@ -8,6 +8,8 @@ import { Home } from "./views/Home";
 import { ImpactGraph } from "./views/ImpactGraph";
 import { Login } from "./views/Login";
 import { PrDiffView } from "./views/PrDiffView";
+import { RepoLayout, RepoIndexRedirect } from "./views/RepoLayout";
+import { RepoDocsTab, RepoGraphTab, RepoPrDetailTab, RepoPrsTab } from "./views/RepoTabs";
 import { Signup } from "./views/Signup";
 
 const queryClient = new QueryClient({
@@ -26,6 +28,13 @@ export function App() {
             <Route path="/" element={<RequireAuth><Home /></RequireAuth>} />
             <Route path="/runs/:runId" element={<RequireAuth><DocsDashboard /></RequireAuth>} />
             <Route path="/runs/:runId/graph" element={<RequireAuth><ImpactGraph /></RequireAuth>} />
+            <Route path="/repos/:repoId" element={<RequireAuth><RepoLayout /></RequireAuth>}>
+              <Route index element={<RepoIndexRedirect />} />
+              <Route path="docs" element={<RepoDocsTab />} />
+              <Route path="graph" element={<RepoGraphTab />} />
+              <Route path="prs" element={<RepoPrsTab />} />
+              <Route path="prs/:pullRequestId" element={<RepoPrDetailTab />} />
+            </Route>
             <Route path="/prs/:pullRequestId" element={<RequireAuth><PrDiffView /></RequireAuth>} />
           </Routes>
         </AuthProvider>

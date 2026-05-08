@@ -135,6 +135,40 @@ export function usePrDocDiff(pullRequestId) {
   });
 }
 
+export function useRepoPullRequests(repoId) {
+  return useQuery({
+    queryKey: ["repo-prs", repoId],
+    enabled: !!repoId,
+    queryFn: async () =>
+      (await client.get(`/repos/${repoId}/pull-requests`)).data,
+    refetchInterval: (q) => {
+      const items = q.state.data?.pull_requests || [];
+      const running = items.some(
+        (p) => p.latest_pr_run && !["succeeded", "failed"].includes(p.latest_pr_run.status),
+      );
+      return running ? 4000 : false;
+    },
+  });
+}
+
+export function useCodeDiff(pullRequestId) {
+  return useQuery({
+    queryKey: ["pr-code-diff", pullRequestId],
+    enabled: !!pullRequestId,
+    queryFn: async () =>
+      (await client.get(`/pull-requests/${pullRequestId}/code-diff`)).data,
+  });
+}
+
+export function useAffectedDocs(pullRequestId) {
+  return useQuery({
+    queryKey: ["pr-affected-docs", pullRequestId],
+    enabled: !!pullRequestId,
+    queryFn: async () =>
+      (await client.get(`/pull-requests/${pullRequestId}/affected-docs`)).data,
+  });
+}
+
 export function useGeneratedDoc(repoId, artifactId) {
   return useQuery({
     queryKey: ["gen-doc", repoId, artifactId],

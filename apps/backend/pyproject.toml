@@ -25,6 +25,7 @@ dependencies = [
   "numpy>=1.26",
   "structlog>=24.0",
   "mcp[cli]>=1.0",
+  "langgraph>=0.2",
 ]
 
 [project.optional-dependencies]

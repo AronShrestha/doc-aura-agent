@@ -52,6 +52,8 @@ class Settings(BaseModel):
     jwt_secret: str = os.getenv("JWT_SECRET", "dev-insecure-change-me")
     jwt_algorithm: str = os.getenv("JWT_ALGORITHM", "HS256")
     jwt_expires_minutes: int = int(os.getenv("JWT_EXPIRES_MINUTES", str(60 * 24 * 7)))
+    public_dashboard_url: str = os.getenv("PUBLIC_DASHBOARD_URL", os.getenv("FRONTEND_URL", "http://localhost:5173"))
+    pr_reviewer_llm_enabled: bool = os.getenv("PR_REVIEWER_LLM_ENABLED", "false").lower() in ("1", "true", "yes")
 
 
 settings = Settings()

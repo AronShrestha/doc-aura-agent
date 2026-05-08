@@ -274,39 +274,68 @@ async def graph_get(
     but not head are flagged ``broken: true`` for the dashed-red render.
     """
     logger.debug("graph requested", extra={"repo_id": repo_id, "pr_run_id": pr_run_id, "event": "graph_get"})
-    run = await _latest_run(session, repo_id, user)
-    head_run_id = run.id
+    canonical_run = await _latest_run(session, repo_id, user)
+    canonical_run_id = canonical_run.id
 
     pr_run = None
     if pr_run_id is not None:
         pr_run = (
             await session.execute(select(PrAnalysisRun).where(PrAnalysisRun.id == pr_run_id))
         ).scalars().first()
-        if pr_run and pr_run.head_run_id:
-            head_run_id = pr_run.head_run_id
 
-    artifacts = (await session.execute(select(Artifact).where(Artifact.run_id == head_run_id))).scalars().all()
-    edges = (await session.execute(select(ArtifactEdge).where(ArtifactEdge.run_id == head_run_id))).scalars().all()
+    canonical_artifacts = (
+        await session.execute(select(Artifact).where(Artifact.run_id == canonical_run_id))
+    ).scalars().all()
+    canonical_edges = (
+        await session.execute(select(ArtifactEdge).where(ArtifactEdge.run_id == canonical_run_id))
+    ).scalars().all()
+
+    artifacts_by_id: dict[str, Artifact] = {a.artifact_id: a for a in canonical_artifacts}
+    edge_keys: set[tuple[str, str, str]] = {(e.src_artifact_id, e.dst_artifact_id, e.kind) for e in canonical_edges}
 
     tiers: dict[str, str] = {}
+    new_node_ids: set[str] = set()
+    new_edges_set: set[tuple[str, str, str]] = set()
     broken_edges: set[tuple[str, str, str]] = set()
+
+    overlay_artifacts: list[Artifact] = []
+    overlay_edges: list[ArtifactEdge] = []
+
     if pr_run and pr_run.impact_summary:
         tiers = pr_run.impact_summary.get("tiers", {}) or {}
-        # base-only edges = removed deps → render as dashed-red
-        if pr_run.base_run_id:
-            base_edges = (
-                await session.execute(
-                    select(ArtifactEdge).where(ArtifactEdge.run_id == pr_run.base_run_id)
-                )
+        added_ids = {a.get("artifact_id") for a in (pr_run.impact_summary.get("added") or []) if a.get("artifact_id")}
+        if pr_run.head_run_id:
+            head_arts = (
+                await session.execute(select(Artifact).where(Artifact.run_id == pr_run.head_run_id))
             ).scalars().all()
-            head_edge_keys = {(e.src_artifact_id, e.dst_artifact_id, e.kind) for e in edges}
-            for be in base_edges:
-                key = (be.src_artifact_id, be.dst_artifact_id, be.kind)
-                if key not in head_edge_keys:
-                    broken_edges.add(key)
+            head_edges = (
+                await session.execute(select(ArtifactEdge).where(ArtifactEdge.run_id == pr_run.head_run_id))
+            ).scalars().all()
+            head_edge_keys = {(e.src_artifact_id, e.dst_artifact_id, e.kind) for e in head_edges}
+            new_edges_set = head_edge_keys - edge_keys
+            for ha in head_arts:
+                if ha.artifact_id in added_ids and ha.artifact_id not in artifacts_by_id:
+                    overlay_artifacts.append(ha)
+                    new_node_ids.add(ha.artifact_id)
+            for he in head_edges:
+                key = (he.src_artifact_id, he.dst_artifact_id, he.kind)
+                if key in new_edges_set:
+                    overlay_edges.append(he)
+        if pr_run.base_run_id:
+            base_edges_rows = (
+                await session.execute(select(ArtifactEdge).where(ArtifactEdge.run_id == pr_run.base_run_id))
+            ).scalars().all()
+            base_edge_keys = {(e.src_artifact_id, e.dst_artifact_id, e.kind) for e in base_edges_rows}
+            head_edge_keys2 = {
+                (e.src_artifact_id, e.dst_artifact_id, e.kind)
+                for e in (
+                    await session.execute(select(ArtifactEdge).where(ArtifactEdge.run_id == pr_run.head_run_id))
+                ).scalars().all()
+            } if pr_run.head_run_id else set()
+            broken_edges = base_edge_keys - head_edge_keys2
 
     nodes = []
-    for a in artifacts:
+    for a in canonical_artifacts:
         nodes.append(
             {
                 "id": a.artifact_id,
@@ -316,6 +345,21 @@ async def graph_get(
                 "line": a.source_line_start,
                 "tier": tiers.get(a.artifact_id),
                 "language": (a.payload or {}).get("language"),
+                "is_new": False,
+            }
+        )
+    # Append PR-only added nodes (overlay; not merged into canonical until PR merge).
+    for a in overlay_artifacts:
+        nodes.append(
+            {
+                "id": a.artifact_id,
+                "category": a.category,
+                "name": a.name,
+                "source_file": a.source_file,
+                "line": a.source_line_start,
+                "tier": tiers.get(a.artifact_id, "Direct"),
+                "language": (a.payload or {}).get("language"),
+                "is_new": True,
             }
         )
 
@@ -325,15 +369,26 @@ async def graph_get(
             "target": e.dst_artifact_id,
             "kind": e.kind,
             "broken": False,
+            "is_new": False,
         }
-        for e in edges
+        for e in canonical_edges
     ]
+    for e in overlay_edges:
+        edge_payload.append(
+            {
+                "source": e.src_artifact_id,
+                "target": e.dst_artifact_id,
+                "kind": e.kind,
+                "broken": False,
+                "is_new": True,
+            }
+        )
     for src, dst, kind in broken_edges:
-        edge_payload.append({"source": src, "target": dst, "kind": kind, "broken": True})
+        edge_payload.append({"source": src, "target": dst, "kind": kind, "broken": True, "is_new": False})
 
     return {
         "repo_id": repo_id,
-        "run_id": head_run_id,
+        "run_id": canonical_run_id,
         "pr_run_id": pr_run.id if pr_run else None,
         "tier_counts": (pr_run.impact_summary or {}).get("tier_counts") if pr_run else None,
         "nodes": nodes,
@@ -365,6 +420,16 @@ async def pr_list(repo_id: int, user=Depends(current_user), session: AsyncSessio
     logger.debug("pr list requested", extra={"repo_id": repo_id, "event": "pr_list"})
     await _user_repo(session, repo_id, user)
     prs = (await session.execute(select(PullRequest).where(PullRequest.repo_id == repo_id).order_by(PullRequest.number.desc()))).scalars().all()
+    pr_ids = [pr.id for pr in prs]
+    runs_by_pr: dict[int, PrAnalysisRun] = {}
+    if pr_ids:
+        runs = (
+            await session.execute(
+                select(PrAnalysisRun).where(PrAnalysisRun.pull_request_id.in_(pr_ids)).order_by(PrAnalysisRun.id.desc())
+            )
+        ).scalars().all()
+        for run in runs:
+            runs_by_pr.setdefault(run.pull_request_id, run)
     return {
         "pull_requests": [
             {
@@ -376,9 +441,94 @@ async def pr_list(repo_id: int, user=Depends(current_user), session: AsyncSessio
                 "base_sha": pr.base_sha,
                 "head_ref": pr.head_ref,
                 "head_sha": pr.head_sha,
+                "html_url": pr.html_url,
+                "merged": bool(pr.merged),
+                "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
+                "latest_pr_run": _pr_run_summary(runs_by_pr.get(pr.id)),
             }
             for pr in prs
         ]
+    }
+
+
+def _pr_run_summary(run: PrAnalysisRun | None) -> dict | None:
+    if not run:
+        return None
+    flags = run.mismatch_flags or {}
+    mismatch_count = (
+        len(flags.get("undocumented_endpoint") or [])
+        + len(flags.get("undocumented_data_model") or [])
+        + len(flags.get("direct_or_high_doc_diff") or [])
+    )
+    return {
+        "id": run.id,
+        "status": run.status,
+        "tier_counts": (run.impact_summary or {}).get("tier_counts") if run.impact_summary else None,
+        "mismatch_flag_count": mismatch_count,
+        "has_mismatch": bool(flags.get("any")),
+        "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+    }
+
+
+@router.get("/pull-requests/{pull_request_id}/code-diff")
+async def pr_code_diff(pull_request_id: int, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
+    logger.debug("pr code-diff requested", extra={"pr_id": pull_request_id, "event": "pr_code_diff"})
+    run = (
+        await session.execute(
+            select(PrAnalysisRun).where(PrAnalysisRun.pull_request_id == pull_request_id).order_by(PrAnalysisRun.id.desc())
+        )
+    ).scalars().first()
+    if not run:
+        raise HTTPException(status_code=404, detail="pr_analysis_not_found")
+    patches = run.code_patches or {}
+    return {
+        "pr_analysis_run_id": run.id,
+        "patches": patches,
+        "files_changed": sorted(patches.keys()),
+    }
+
+
+@router.get("/pull-requests/{pull_request_id}/affected-docs")
+async def pr_affected_docs(pull_request_id: int, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
+    """Ordered list of affected docs powering prev/next navigation in the immersive PR review."""
+    logger.debug("pr affected docs requested", extra={"pr_id": pull_request_id, "event": "pr_affected_docs"})
+    run = (
+        await session.execute(
+            select(PrAnalysisRun).where(PrAnalysisRun.pull_request_id == pull_request_id).order_by(PrAnalysisRun.id.desc())
+        )
+    ).scalars().first()
+    if not run:
+        raise HTTPException(status_code=404, detail="pr_analysis_not_found")
+    diffs = (await session.execute(select(DocDiff).where(DocDiff.pr_analysis_run_id == run.id))).scalars().all()
+    head_run_id = run.head_run_id
+    artifact_ids = [d.artifact_id for d in diffs]
+    source_by_artifact: dict[str, list[str]] = {}
+    if head_run_id and artifact_ids:
+        artifacts = (
+            await session.execute(
+                select(Artifact).where(Artifact.run_id == head_run_id, Artifact.artifact_id.in_(artifact_ids))
+            )
+        ).scalars().all()
+        for a in artifacts:
+            if a.source_file:
+                source_by_artifact.setdefault(a.artifact_id, []).append(a.source_file)
+    tier_order = {"Direct": 0, "High": 1, "Medium": 2}
+    items = sorted(
+        diffs,
+        key=lambda d: (tier_order.get(d.impact_tier, 9), d.doc_path),
+    )
+    return {
+        "pr_analysis_run_id": run.id,
+        "items": [
+            {
+                "artifact_id": d.artifact_id,
+                "doc_path": d.doc_path,
+                "impact_tier": d.impact_tier,
+                "change_type": d.change_type,
+                "source_files": source_by_artifact.get(d.artifact_id, []),
+            }
+            for d in items
+        ],
     }
 
 
@@ -388,11 +538,28 @@ async def pr_impact(pull_request_id: int, user=Depends(current_user), session: A
     run = (await session.execute(select(PrAnalysisRun).where(PrAnalysisRun.pull_request_id == pull_request_id).order_by(PrAnalysisRun.id.desc()))).scalars().first()
     if not run:
         raise HTTPException(status_code=404, detail="pr_analysis_not_found")
+    pr = (await session.execute(select(PullRequest).where(PullRequest.id == pull_request_id))).scalar_one_or_none()
     return {
         "pr_analysis_run_id": run.id,
         "status": run.status,
         "impact_summary": run.impact_summary,
         "review_comment_body": run.review_comment_body,
+        "mismatch_flags": run.mismatch_flags,
+        "dashboard_url": run.dashboard_url,
+        "pull_request": (
+            {
+                "id": pr.id,
+                "number": pr.number,
+                "title": pr.title,
+                "state": pr.state,
+                "merged": bool(pr.merged),
+                "html_url": pr.html_url,
+                "base_ref": pr.base_ref,
+                "head_ref": pr.head_ref,
+            }
+            if pr
+            else None
+        ),
         "shadow_pr": (
             {
                 "url": run.shadow_pr_url,
@@ -446,8 +613,19 @@ async def _user_repo(session: AsyncSession, repo_id: int, user: User) -> Repo:
 
 
 async def _latest_run(session: AsyncSession, repo_id: int, user: User) -> AnalysisRun:
-    await _user_repo(session, repo_id, user)
-    run = (await session.execute(select(AnalysisRun).where(AnalysisRun.repo_id == repo_id).order_by(AnalysisRun.id.desc()))).scalars().first()
+    repo = await _user_repo(session, repo_id, user)
+    run = (
+        await session.execute(
+            select(AnalysisRun)
+            .where(
+                AnalysisRun.repo_id == repo_id,
+                AnalysisRun.is_pr_run.is_(False),
+                AnalysisRun.branch == repo.default_branch,
+                AnalysisRun.status == "succeeded",
+            )
+            .order_by(AnalysisRun.id.desc())
+        )
+    ).scalars().first()
     if not run:
         raise HTTPException(status_code=404, detail="repo_or_docs_not_found")
     return run

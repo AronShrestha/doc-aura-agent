@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime
-from sqlalchemy import String, Integer, DateTime, ForeignKey, LargeBinary, Text, JSON, UniqueConstraint
+from sqlalchemy import Boolean, String, Integer, DateTime, ForeignKey, LargeBinary, Text, JSON, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -71,6 +71,7 @@ class AnalysisRun(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     quality_report: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     activity: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    is_pr_run: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -149,6 +150,8 @@ class PullRequest(Base):
     base_sha: Mapped[str] = mapped_column(String(128), default="")
     head_ref: Mapped[str] = mapped_column(String(255), default="")
     head_sha: Mapped[str] = mapped_column(String(128), default="")
+    html_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    merged: Mapped[bool] = mapped_column(Boolean, default=False)
     comment_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -167,6 +170,9 @@ class PrAnalysisRun(Base):
     shadow_pr_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
     shadow_pr_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     shadow_pr_file_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    code_patches: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    mismatch_flags: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    dashboard_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

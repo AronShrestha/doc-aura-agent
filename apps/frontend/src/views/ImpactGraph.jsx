@@ -48,8 +48,18 @@ const EDGE_PALETTE = {
   _default:         { color: "#94a3b8", style: "solid",  label: "" },
 };
 
-function nodeStyle(category, tierColor) {
+function nodeStyle(category, tierColor, isNew) {
   const p = NODE_PALETTE[category] || NODE_PALETTE._default;
+  if (isNew) {
+    return {
+      fg: "#064e3b",
+      bg: "#ecfdf5",
+      border: "#10b981",
+      icon: p.icon,
+      borderStyle: "dashed",
+      borderWidth: 3,
+    };
+  }
   return {
     fg: tierColor || p.fg,
     bg: tierColor ? `${tierColor}1f` : p.bg,
@@ -58,10 +68,13 @@ function nodeStyle(category, tierColor) {
   };
 }
 
-function edgeStyle(kind, broken) {
+function edgeStyle(kind, broken, isNew) {
   const p = EDGE_PALETTE[kind] || EDGE_PALETTE._default;
   if (broken) {
     return { stroke: "#dc2626", strokeDasharray: "6 4", strokeWidth: 2.4, label: p.label };
+  }
+  if (isNew) {
+    return { stroke: "#10b981", strokeDasharray: "8 4", strokeWidth: 2.6, label: p.label };
   }
   const dash =
     p.style === "dashed" ? "6 4" : p.style === "dotted" ? "2 4" : undefined;
@@ -76,12 +89,13 @@ function edgeStyle(kind, broken) {
  * (in base, missing in head) render as dashed-red — the "live edge break"
  * demo moment.
  */
-export function ImpactGraph() {
-  const { runId } = useParams();
+export function ImpactGraph({ runIdOverride, prRunIdOverride, repoIdOverride } = {}) {
+  const params = useParams();
   const [search] = useSearchParams();
-  const prRunId = search.get("prRun");
-  const runQ = useRun(Number(runId));
-  const repoId = runQ.data?.repo_id;
+  const runId = runIdOverride ?? params.runId;
+  const prRunId = prRunIdOverride ?? search.get("prRun");
+  const runQ = useRun(Number(runId), { enabled: !!runId && !repoIdOverride });
+  const repoId = repoIdOverride ?? runQ.data?.repo_id;
   const graphQ = useGraph(repoId, prRunId ? Number(prRunId) : undefined);
 
   const laidOut = useMemo(
@@ -272,15 +286,19 @@ function layoutGraph(rawNodes, rawEdges) {
     categoryCounts[n.category] = (categoryCounts[n.category] || 0) + 1;
     const pos = g.node(n.id);
     const tierColor = n.tier ? TIER_NODE_COLOR[n.tier] : null;
-    const ns = nodeStyle(n.category, tierColor);
+    const ns = nodeStyle(n.category, tierColor, n.is_new);
+    const classNames = [];
+    if (n.tier === "Direct") classNames.push("node-pulse-direct");
+    if (n.is_new) classNames.push("node-pulse-new");
     return {
       id: n.id,
       data: { label: nodeLabel(n, ns) },
       position: { x: pos?.x || 0, y: pos?.y || 0 },
+      className: classNames.join(" ") || undefined,
       style: {
         width: NODE_W,
         background: ns.bg,
-        border: `2px solid ${ns.border}`,
+        border: `${ns.borderWidth || 2}px ${ns.borderStyle || "solid"} ${ns.border}`,
         borderRadius: 10,
         padding: "6px 10px",
         fontSize: 12,
@@ -293,7 +311,7 @@ function layoutGraph(rawNodes, rawEdges) {
   const kindCounts = {};
   const edges = rawEdges.map((e, i) => {
     kindCounts[e.kind] = (kindCounts[e.kind] || 0) + 1;
-    const es = edgeStyle(e.kind, e.broken);
+    const es = edgeStyle(e.kind, e.broken, e.is_new);
     return {
       id: `${e.source}->${e.target}-${i}`,
       source: e.source,
@@ -303,7 +321,7 @@ function layoutGraph(rawNodes, rawEdges) {
       labelBgStyle: { fill: "#ffffff", fillOpacity: 0.9 },
       labelBgPadding: [3, 2],
       labelBgBorderRadius: 3,
-      animated: !!e.broken,
+      animated: !!(e.broken || e.is_new),
       style: {
         stroke: es.stroke,
         strokeWidth: es.strokeWidth,

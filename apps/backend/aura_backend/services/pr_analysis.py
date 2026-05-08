@@ -22,6 +22,12 @@ async def analyze_pull_request(
     session_factory: async_sessionmaker,
     pull_request_id: int,
 ) -> None:
+    """Legacy entrypoint kept for back-compat / direct tests.
+
+    Webhooks should call ``services.pr_orchestrator.run_pr_orchestrator``
+    instead, which wraps this flow in a LangGraph state graph and runs
+    the dashboard + comment agents.
+    """
     logger.info("pr analysis starting", extra={"pr_id": pull_request_id})
     async with session_factory() as session:
         pr = (await session.execute(select(PullRequest).where(PullRequest.id == pull_request_id))).scalar_one()
@@ -34,18 +40,18 @@ async def analyze_pull_request(
     try:
         base_run_id = await run_static_analysis_for_ref(session_factory, pr.repo_id, pr.base_ref, pr.base_sha)
         head_run_id = await run_static_analysis_for_ref(session_factory, pr.repo_id, pr.head_ref, pr.head_sha)
-        impact, diff_rows, comment = await _compare_runs(session_factory, base_run_id, head_run_id)
+        impact, diff_rows = await compare_runs(session_factory, base_run_id, head_run_id)
+        comment = build_default_comment(impact, diff_rows)
         logger.info("pr base/head runs compared", extra={"pr_id": pull_request_id, "pr_run_id": pr_run_id})
-        async with session_factory() as session:
-            pr_run = (await session.execute(select(PrAnalysisRun).where(PrAnalysisRun.id == pr_run_id))).scalar_one()
-            pr_run.status = "succeeded"
-            pr_run.base_run_id = base_run_id
-            pr_run.head_run_id = head_run_id
-            pr_run.impact_summary = impact
-            pr_run.review_comment_body = comment
-            pr_run.updated_at = datetime.utcnow()
-            session.add_all([_doc_diff_row(pr_run_id, row) for row in diff_rows])
-            await session.commit()
+        await persist_pr_run(
+            session_factory,
+            pr_run_id=pr_run_id,
+            base_run_id=base_run_id,
+            head_run_id=head_run_id,
+            impact=impact,
+            diff_rows=diff_rows,
+            comment=comment,
+        )
         try:
             await materialize_shadow_pr(session_factory, pr_run_id)
         except Exception as exc:
@@ -53,12 +59,66 @@ async def analyze_pull_request(
         logger.info("pr analysis succeeded", extra={"pr_id": pull_request_id, "pr_run_id": pr_run_id})
     except Exception as exc:
         logger.exception("pr analysis failed", extra={"pr_id": pull_request_id, "pr_run_id": pr_run_id})
-        async with session_factory() as session:
-            pr_run = (await session.execute(select(PrAnalysisRun).where(PrAnalysisRun.id == pr_run_id))).scalar_one()
-            pr_run.status = "failed"
-            pr_run.error = str(exc)
-            pr_run.updated_at = datetime.utcnow()
-            await session.commit()
+        await mark_pr_run_failed(session_factory, pr_run_id, str(exc))
+
+
+async def compare_runs(
+    session_factory: async_sessionmaker,
+    base_run_id: int,
+    head_run_id: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Pure compare: returns (impact_summary, diff_rows). No DB writes."""
+    impact, diff_rows, _comment = await _compare_runs(session_factory, base_run_id, head_run_id)
+    return impact, diff_rows
+
+
+def build_default_comment(impact: dict[str, Any], diff_rows: list[dict[str, Any]]) -> str:
+    """Templated fallback comment used by the legacy entrypoint."""
+    head_by_id: dict[str, Artifact] = {}
+    base_by_id: dict[str, Artifact] = {}
+    tiers = impact.get("tiers", {}) or {}
+    return _comment_body(impact, diff_rows, head_by_id, base_by_id, tiers)
+
+
+async def persist_pr_run(
+    session_factory: async_sessionmaker,
+    *,
+    pr_run_id: int,
+    base_run_id: int,
+    head_run_id: int,
+    impact: dict[str, Any],
+    diff_rows: list[dict[str, Any]],
+    comment: str,
+    code_patches: dict[str, str] | None = None,
+    mismatch_flags: dict[str, Any] | None = None,
+    dashboard_url: str | None = None,
+) -> None:
+    """Persist orchestrator results onto an existing PrAnalysisRun row."""
+    async with session_factory() as session:
+        pr_run = (await session.execute(select(PrAnalysisRun).where(PrAnalysisRun.id == pr_run_id))).scalar_one()
+        pr_run.status = "succeeded"
+        pr_run.base_run_id = base_run_id
+        pr_run.head_run_id = head_run_id
+        pr_run.impact_summary = impact
+        pr_run.review_comment_body = comment
+        if code_patches is not None:
+            pr_run.code_patches = code_patches
+        if mismatch_flags is not None:
+            pr_run.mismatch_flags = mismatch_flags
+        if dashboard_url is not None:
+            pr_run.dashboard_url = dashboard_url
+        pr_run.updated_at = datetime.utcnow()
+        session.add_all([_doc_diff_row(pr_run_id, row) for row in diff_rows])
+        await session.commit()
+
+
+async def mark_pr_run_failed(session_factory: async_sessionmaker, pr_run_id: int, error: str) -> None:
+    async with session_factory() as session:
+        pr_run = (await session.execute(select(PrAnalysisRun).where(PrAnalysisRun.id == pr_run_id))).scalar_one()
+        pr_run.status = "failed"
+        pr_run.error = error
+        pr_run.updated_at = datetime.utcnow()
+        await session.commit()
 
 
 async def _compare_runs(session_factory: async_sessionmaker, base_run_id: int, head_run_id: int) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
@@ -113,7 +173,7 @@ async def _compare_runs(session_factory: async_sessionmaker, base_run_id: int, h
             for level in ("critical", "warning", "info")
         },
     }
-    diffs = _doc_diffs(base_docs, head_docs, tiers, direct)
+    diffs = _doc_diffs(base_docs, head_docs, tiers, direct, base_by_id=base_by_id, head_by_id=head_by_id)
     logger.info("pr impact comparison complete", extra={"event": "pr_compare_complete"})
     return impact, diffs, _comment_body(impact, diffs, head_by_id, base_by_id, tiers)
 
@@ -217,13 +277,17 @@ def _doc_diffs(
     head_docs: list[GeneratedDoc],
     tiers: dict[str, str],
     direct: set[str],
+    *,
+    base_by_id: dict[str, Artifact] | None = None,
+    head_by_id: dict[str, Artifact] | None = None,
 ) -> list[dict[str, Any]]:
-    base_by_id = {d.artifact_id: d for d in base_docs}
-    head_by_id = {d.artifact_id: d for d in head_docs}
+    base_doc_by_id = {d.artifact_id: d for d in base_docs}
+    head_doc_by_id = {d.artifact_id: d for d in head_docs}
     rows: list[dict[str, Any]] = []
-    for aid in sorted(set(base_by_id) | set(head_by_id)):
-        before = base_by_id.get(aid)
-        after = head_by_id.get(aid)
+    covered: set[str] = set()
+    for aid in sorted(set(base_doc_by_id) | set(head_doc_by_id)):
+        before = base_doc_by_id.get(aid)
+        after = head_doc_by_id.get(aid)
         if before and after and before.content_hash == after.content_hash:
             continue
         before_text = before.content_md if before else ""
@@ -251,7 +315,127 @@ def _doc_diffs(
                 "side_by_side": _side_by_side(before_text, after_text),
             }
         )
+        covered.add(aid)
+
+    # Synthesize per-artifact doc diffs for Direct artifacts that have no
+    # GeneratedDoc row (project-level docs only cover aggregates, so a single
+    # field/signature change to a model or function would otherwise produce
+    # no visible doc diff).
+    if base_by_id is not None and head_by_id is not None:
+        for aid in sorted(direct):
+            if aid in covered:
+                continue
+            base_art = base_by_id.get(aid)
+            head_art = head_by_id.get(aid)
+            if not base_art and not head_art:
+                continue
+            before_text = _render_artifact_card(base_art) if base_art else ""
+            after_text = _render_artifact_card(head_art) if head_art else ""
+            if before_text == after_text:
+                continue
+            change_type = "added" if base_art is None else "removed" if head_art is None else "modified"
+            ref_art = head_art or base_art
+            doc_path = _synthetic_doc_path(ref_art)
+            unified = "\n".join(
+                difflib.unified_diff(
+                    before_text.splitlines(),
+                    after_text.splitlines(),
+                    fromfile=f"base/{doc_path}",
+                    tofile=f"head/{doc_path}",
+                    lineterm="",
+                )
+            )
+            rows.append(
+                {
+                    "artifact_id": aid,
+                    "doc_path": doc_path,
+                    "change_type": change_type,
+                    "impact_tier": "Direct",
+                    "affected_symbol_ids": [aid],
+                    "unified_diff": unified,
+                    "side_by_side": _side_by_side(before_text, after_text),
+                }
+            )
     return rows
+
+
+def _synthetic_doc_path(art: Artifact) -> str:
+    cat = (art.category or "artifact").replace("_", "-")
+    name = art.name or art.artifact_id
+    return f"{cat}/{name}.md"
+
+
+def _render_artifact_card(art: Artifact) -> str:
+    """Render a small Markdown spec card for one artifact, derived purely
+    from its tree-sitter payload. Used as the synthetic 'doc' for Direct
+    artifacts that have no LLM-generated doc.
+    """
+    payload = art.payload or {}
+    lines: list[str] = []
+    lines.append(f"# {art.name}")
+    lines.append("")
+    meta = []
+    if art.category:
+        meta.append(f"**Kind:** `{art.category}`")
+    if art.source_file:
+        loc = art.source_file
+        if art.source_line_start:
+            loc = f"{loc}:L{art.source_line_start}"
+        meta.append(f"**Source:** `{loc}`")
+    if payload.get("language"):
+        meta.append(f"**Language:** `{payload['language']}`")
+    if meta:
+        lines.append(" · ".join(meta))
+        lines.append("")
+    sig = payload.get("signature")
+    if sig:
+        lines.append("## Signature")
+        lines.append("")
+        lang = payload.get("language", "")
+        lines.append(f"```{lang}")
+        lines.append(str(sig))
+        lines.append("```")
+        lines.append("")
+    fields = payload.get("fields")
+    if fields:
+        lines.append("## Fields")
+        lines.append("")
+        lines.append("| Name | Type | Default | Nullable |")
+        lines.append("|------|------|---------|----------|")
+        for f in fields:
+            lines.append(
+                f"| `{f.get('name','')}` | `{f.get('type','')}` | "
+                f"`{f.get('default') if f.get('default') is not None else ''}` | "
+                f"{'yes' if f.get('nullable') else 'no'} |"
+            )
+        lines.append("")
+    base_classes = payload.get("base_classes")
+    if base_classes:
+        lines.append(f"**Base classes:** {', '.join(f'`{b}`' for b in base_classes)}")
+        lines.append("")
+    decorators = payload.get("decorators")
+    if decorators:
+        lines.append(f"**Decorators:** {', '.join(f'`{d}`' for d in decorators)}")
+        lines.append("")
+    relationships = payload.get("relationships")
+    if relationships:
+        lines.append("## Relationships")
+        lines.append("")
+        for r in relationships:
+            lines.append(f"- `{r}`")
+        lines.append("")
+    exports = payload.get("exports")
+    if exports:
+        lines.append(f"**Exports:** {', '.join(f'`{e}`' for e in exports)}")
+        lines.append("")
+    imports = payload.get("imports")
+    if imports:
+        sample = list(imports)[:10]
+        lines.append(f"**Imports:** {', '.join(f'`{e}`' for e in sample)}")
+        if len(imports) > len(sample):
+            lines.append(f"_…and {len(imports) - len(sample)} more_")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _side_by_side(before: str, after: str) -> dict[str, Any]:

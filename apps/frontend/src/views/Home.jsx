@@ -186,13 +186,13 @@ function RepoCard({ repo }) {
   const navigable = !!run?.id;
 
   const onCardClick = () => {
-    if (navigable) navigate(`/runs/${run.id}`);
+    if (navigable) navigate(`/repos/${repo.repo_id}`);
   };
   const onCardKey = (e) => {
     if (!navigable) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      navigate(`/runs/${run.id}`);
+      navigate(`/repos/${repo.repo_id}`);
     }
   };
 
@@ -234,19 +234,36 @@ function RepoCard({ repo }) {
           <div className="repo-progress-fill" style={{ width: `${progress}%` }} />
         </div>
       )}
-      {repo.full_name && (
-        <a
-          className="repo-link repo-link-card"
-          href={repoUrl(repo.full_name)}
-          target="_blank"
-          rel="noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          title={`Open ${repo.full_name} on GitHub`}
-        >
-          <GithubGlyph size={12} />
-          <span>Open on GitHub</span>
-        </a>
-      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+        {repo.repo_id && (
+          <button
+            type="button"
+            className="repo-link repo-link-card"
+            onClick={(e) => {
+              e.stopPropagation();
+              navigate(`/repos/${repo.repo_id}/prs`);
+            }}
+            title="Active pull requests"
+            style={{ background: "transparent", border: "1px solid #e5e7eb", cursor: "pointer" }}
+          >
+            <span>📥</span>
+            <span>PRs</span>
+          </button>
+        )}
+        {repo.full_name && (
+          <a
+            className="repo-link repo-link-card"
+            href={repoUrl(repo.full_name)}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            title={`Open ${repo.full_name} on GitHub`}
+          >
+            <GithubGlyph size={12} />
+            <span>Open on GitHub</span>
+          </a>
+        )}
+      </div>
     </article>
   );
 }

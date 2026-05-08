@@ -83,7 +83,11 @@ async def my_repos(user: User = Depends(current_user), session: AsyncSession = D
         run = (
             await session.execute(
                 select(AnalysisRun)
-                .where(AnalysisRun.repo_id == repo.id)
+                .where(
+                    AnalysisRun.repo_id == repo.id,
+                    AnalysisRun.is_pr_run.is_(False),
+                    AnalysisRun.branch == repo.default_branch,
+                )
                 .order_by(AnalysisRun.id.desc())
             )
         ).scalars().first()

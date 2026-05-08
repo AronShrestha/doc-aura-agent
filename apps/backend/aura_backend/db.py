@@ -24,6 +24,8 @@ async def ensure_columns(conn) -> None:
         await conn.execute(text("ALTER TABLE analysis_runs ADD COLUMN user_id INTEGER"))
     if "activity" not in runs_cols:
         await conn.execute(text("ALTER TABLE analysis_runs ADD COLUMN activity TEXT"))
+    if "is_pr_run" not in runs_cols:
+        await conn.execute(text("ALTER TABLE analysis_runs ADD COLUMN is_pr_run BOOLEAN DEFAULT 0"))
 
     user_cols = await _existing("users")
     if user_cols:
@@ -37,3 +39,19 @@ async def ensure_columns(conn) -> None:
     repo_cols = await _existing("repos")
     if repo_cols and "user_id" not in repo_cols:
         await conn.execute(text("ALTER TABLE repos ADD COLUMN user_id INTEGER"))
+
+    pr_cols = await _existing("pull_requests")
+    if pr_cols:
+        if "html_url" not in pr_cols:
+            await conn.execute(text("ALTER TABLE pull_requests ADD COLUMN html_url VARCHAR(500)"))
+        if "merged" not in pr_cols:
+            await conn.execute(text("ALTER TABLE pull_requests ADD COLUMN merged BOOLEAN DEFAULT 0"))
+
+    pr_run_cols = await _existing("pr_analysis_runs")
+    if pr_run_cols:
+        if "code_patches" not in pr_run_cols:
+            await conn.execute(text("ALTER TABLE pr_analysis_runs ADD COLUMN code_patches JSON"))
+        if "mismatch_flags" not in pr_run_cols:
+            await conn.execute(text("ALTER TABLE pr_analysis_runs ADD COLUMN mismatch_flags JSON"))
+        if "dashboard_url" not in pr_run_cols:
+            await conn.execute(text("ALTER TABLE pr_analysis_runs ADD COLUMN dashboard_url VARCHAR(500)"))

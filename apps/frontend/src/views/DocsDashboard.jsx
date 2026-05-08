@@ -17,8 +17,9 @@ import { GithubGlyph, repoUrl } from "../components/BrandMark";
  * full Markdown rendering. Inline `[verified: ...]` markers are rewritten
  * into VerifiedBadge pills.
  */
-export function DocsDashboard() {
-  const { runId } = useParams();
+export function DocsDashboard({ runIdOverride } = {}) {
+  const params = useParams();
+  const runId = runIdOverride ?? params.runId;
   const numericRunId = Number(runId);
   const queryClient = useQueryClient();
   const runQ = useRun(numericRunId);

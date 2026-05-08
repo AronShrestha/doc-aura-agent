@@ -152,6 +152,24 @@ async def run_analysis(run_id: int, session_factory: async_sessionmaker) -> None
                     extra={"run_id": run_id, "repo_id": repo.id, "stage": "extract"},
                 )
             elif stage == "synthesize":
+                if run.is_pr_run:
+                    # PR runs skip LLM doc generation entirely. We only need
+                    # artifacts + edges for the impact diff; the synthetic
+                    # per-artifact card is rendered later from payload.
+                    logger.info(
+                        "synthesize skipped for pr run",
+                        extra={"run_id": run_id, "repo_id": repo.id, "stage": "synthesize"},
+                    )
+                    result = AnalysisResult(
+                        snapshot=snapshot,
+                        artifacts=artifacts,
+                        edges=edges,
+                        docs=[],
+                        manifest={},
+                        quality_report={"agent_workflow": "pr_static_only"},
+                    )
+                    continue
+
                 llm_client = _pipeline_llm_client()
                 vlm_client = _pipeline_vlm_client()
 
@@ -215,6 +233,8 @@ async def run_static_analysis_for_ref(
     repo_id: int,
     ref: str,
     commit_sha: str = "",
+    *,
+    is_pr_run: bool = False,
 ) -> int:
     logger.info("static analysis for ref queued", extra={"repo_id": repo_id, "stage": "pr_ref_analysis"})
     async with session_factory() as session:
@@ -226,6 +246,7 @@ async def run_static_analysis_for_ref(
             progress=0,
             branch=ref,
             commit_sha=commit_sha or ref,
+            is_pr_run=is_pr_run,
         )
         session.add(run)
         await session.commit()
