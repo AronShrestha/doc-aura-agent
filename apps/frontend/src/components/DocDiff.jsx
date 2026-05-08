@@ -22,6 +22,8 @@ export function DocDiff({ diff }) {
         borderRadius: 8,
         overflow: "hidden",
         background: "#fff",
+        minWidth: 0,
+        maxWidth: "100%",
       }}
     >
       <div
@@ -38,7 +40,7 @@ export function DocDiff({ diff }) {
         <span style={{ fontWeight: 600, fontSize: 13, color: "#374151" }}>{diff.change_type}</span>
         <code style={{ fontSize: 12, color: "#6b7280" }}>{diff.doc_path}</code>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", minWidth: 0 }}>
         <DiffPane label="Before" blocks={beforeBlocks} side="base" />
         <DiffPane label="After" blocks={afterBlocks} side="head" borderLeft />
       </div>
@@ -54,6 +56,9 @@ function DiffPane({ label, blocks, side, borderLeft = false }) {
         display: "flex",
         flexDirection: "column",
         minHeight: 120,
+        minWidth: 0,
+        maxWidth: "100%",
+        overflow: "hidden",
       }}
     >
       <div
@@ -70,7 +75,7 @@ function DiffPane({ label, blocks, side, borderLeft = false }) {
       >
         {label}
       </div>
-      <div style={{ padding: "8px 14px", flex: 1 }}>
+      <div style={{ padding: "8px 14px", flex: 1, maxWidth: "100%", minWidth: 0, overflow: "auto" }}>
         {blocks.length === 0 ? (
           <p style={{ color: "#9ca3af", fontSize: 13, margin: 0 }}>(empty)</p>
         ) : (
@@ -95,7 +100,16 @@ function Block({ block, side }) {
         borderRadius: 4,
       }}
     >
-      <div className="md-render" style={{ fontSize: 13, lineHeight: 1.55, color: "#1f2937" }}>
+      <div
+        className="md-render"
+        style={{
+          fontSize: 13,
+          lineHeight: 1.55,
+          color: "#1f2937",
+          overflowWrap: "anywhere",
+          wordBreak: "break-word",
+        }}
+      >
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
       </div>
     </div>

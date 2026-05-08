@@ -30,7 +30,7 @@ export function AuthLayout({ eyebrow, title, subtitle, children, footerSwitch })
       <aside className="auth-form-side">
         <Link to="/" className="auth-brand-row">
           <BrandMark size={26} />
-          <span>Aura</span>
+          <span>Doc AURA</span>
         </Link>
 
         <div className="auth-form-inner">
@@ -42,7 +42,7 @@ export function AuthLayout({ eyebrow, title, subtitle, children, footerSwitch })
         </div>
 
         <div className="auth-footer">
-          <span>© {new Date().getFullYear()} Aura</span>
+          <span>© {new Date().getFullYear()} Doc AURA</span>
           <span>
             <a href="#" onClick={(e) => e.preventDefault()}>Privacy</a>
             {" · "}
@@ -54,7 +54,7 @@ export function AuthLayout({ eyebrow, title, subtitle, children, footerSwitch })
       <aside className="auth-brand-side" aria-hidden>
         <div className="auth-brand-top">
           <BrandMark size={26} />
-          <span>Aura</span>
+          <span>Doc AURA</span>
         </div>
 
         <div className="auth-quote">

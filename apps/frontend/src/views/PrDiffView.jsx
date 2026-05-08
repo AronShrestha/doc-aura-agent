@@ -1,8 +1,9 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactDiffViewer from "react-diff-viewer-continued";
 import { Link, useParams, useSearchParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 
-import { useAffectedDocs, useCodeDiff, usePrDocDiff, usePrImpact } from "../api";
+import { reAnalyzePr, useAffectedDocs, useCodeDiff, usePrDocDiff, usePrImpact } from "../api";
 import { DocDiff } from "../components/DocDiff";
 import { TierChip } from "../components/TierChip";
 
@@ -76,8 +77,44 @@ export function PrDiffView({ pullRequestIdOverride } = {}) {
   const hasMismatch = !!mismatchFlags?.any;
   const prMeta = impactQ.data?.pull_request;
 
+  const queryClient = useQueryClient();
+  const [reAnalyzing, setReAnalyzing] = useState(false);
+  async function handleReAnalyze() {
+    if (reAnalyzing) return;
+    setReAnalyzing(true);
+    try {
+      await reAnalyzePr(numericId);
+    } catch (err) {
+      console.error("re-analyze failed", err);
+      setReAnalyzing(false);
+      return;
+    }
+    let attempts = 0;
+    const poll = setInterval(() => {
+      queryClient.invalidateQueries({ queryKey: ["pr-impact", numericId] });
+      queryClient.invalidateQueries({ queryKey: ["pr-doc-diff", numericId] });
+      queryClient.invalidateQueries({ queryKey: ["pr-affected-docs", numericId] });
+      queryClient.invalidateQueries({ queryKey: ["pr-code-diff", numericId] });
+      attempts += 1;
+      if (attempts > 20) {
+        clearInterval(poll);
+        setReAnalyzing(false);
+      }
+    }, 5000);
+  }
+
   return (
-    <div style={{ padding: 16 }}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        minHeight: 0,
+        padding: 16,
+        gap: 12,
+        boxSizing: "border-box",
+      }}
+    >
       <div
         style={{
           display: "flex",
@@ -87,8 +124,8 @@ export function PrDiffView({ pullRequestIdOverride } = {}) {
           background: "#f9fafb",
           border: "1px solid #e5e7eb",
           borderRadius: 8,
-          marginBottom: 12,
           flexWrap: "wrap",
+          flexShrink: 0,
         }}
       >
         <h2 style={{ margin: 0 }}>PR #{prMeta?.number ?? pullRequestId}</h2>
@@ -120,6 +157,22 @@ export function PrDiffView({ pullRequestIdOverride } = {}) {
             merged
           </span>
         )}
+        <button
+          onClick={handleReAnalyze}
+          disabled={reAnalyzing}
+          title="Re-run the PR orchestrator (1-3 min)"
+          style={{
+            padding: "4px 10px",
+            borderRadius: 6,
+            border: "1px solid #d1d5db",
+            background: reAnalyzing ? "#f3f4f6" : "#fff",
+            color: reAnalyzing ? "#9ca3af" : "#374151",
+            cursor: reAnalyzing ? "wait" : "pointer",
+            fontSize: 12,
+          }}
+        >
+          {reAnalyzing ? "↻ Re-analyzing…" : "↻ Re-analyze PR"}
+        </button>
         <TierChip tier="Direct" count={counts.Direct || 0} />
         <TierChip tier="High" count={counts.High || 0} />
         <TierChip tier="Medium" count={counts.Medium || 0} />
@@ -165,8 +218,8 @@ export function PrDiffView({ pullRequestIdOverride } = {}) {
             background: "#fef3c7",
             border: "1px solid #fcd34d",
             color: "#7c2d12",
-            marginBottom: 12,
             fontSize: 13,
+            flexShrink: 0,
           }}
         >
           ⚠ Documentation mismatch detected:{" "}
@@ -177,7 +230,7 @@ export function PrDiffView({ pullRequestIdOverride } = {}) {
       )}
 
       {activeItem && (
-        <div style={{ marginBottom: 8, fontSize: 12, color: "#6b7280" }}>
+        <div style={{ fontSize: 12, color: "#6b7280", flexShrink: 0 }}>
           <strong style={{ color: "#1f2937" }}>{activeItem.impact_tier}</strong>
           {" · "}
           <code>{activeItem.doc_path}</code>
@@ -190,48 +243,8 @@ export function PrDiffView({ pullRequestIdOverride } = {}) {
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, alignItems: "start" }}>
-        <section
-          style={{
-            border: "1px solid #e5e7eb",
-            borderRadius: 8,
-            background: "#fff",
-            overflow: "hidden",
-            minHeight: 240,
-          }}
-        >
-          <header style={paneHeader("#0c4a6e", "#e0f2fe", "#0284c7")}>Code change</header>
-          {codeQ.isLoading && <p style={{ padding: 12, color: "#6b7280" }}>Loading code patch…</p>}
-          {!codeQ.isLoading && activePatches.length === 0 && (
-            <p style={{ padding: 12, color: "#6b7280", fontSize: 13 }}>
-              No code patch available for this doc.
-            </p>
-          )}
-          {activePatches.map(({ file, patch }) => (
-            <PatchBlock key={file} file={file} patch={patch} />
-          ))}
-        </section>
-
-        <section
-          style={{
-            border: "1px solid #e5e7eb",
-            borderRadius: 8,
-            background: "#fff",
-            overflow: "hidden",
-            minHeight: 240,
-          }}
-        >
-          <header style={paneHeader("#831843", "#fdf2f8", "#ec4899")}>Documentation change</header>
-          {diffQ.isLoading && <p style={{ padding: 12, color: "#6b7280" }}>Loading doc diff…</p>}
-          {!diffQ.isLoading && !activeDiff && (
-            <p style={{ padding: 12, color: "#6b7280", fontSize: 13 }}>No doc diff for this artifact.</p>
-          )}
-          {activeDiff && <DocDiff diff={activeDiff} />}
-        </section>
-      </div>
-
       {ordered.length > 0 && (
-        <details style={{ marginTop: 18 }}>
+        <details style={{ flexShrink: 0 }}>
           <summary style={{ cursor: "pointer", color: "#6b7280", fontSize: 13 }}>
             All affected docs ({ordered.length})
           </summary>
@@ -263,9 +276,47 @@ export function PrDiffView({ pullRequestIdOverride } = {}) {
           </div>
         </details>
       )}
+
+      <div style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, overflow: "hidden" }}>
+        <section style={paneShellStyle}>
+          <header style={paneHeader("#0c4a6e", "#e0f2fe", "#0284c7")}>Code change</header>
+          <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
+            {codeQ.isLoading && <p style={{ padding: 12, color: "#6b7280" }}>Loading code patch…</p>}
+            {!codeQ.isLoading && activePatches.length === 0 && (
+              <p style={{ padding: 12, color: "#6b7280", fontSize: 13 }}>
+                No code patch available for this doc.
+              </p>
+            )}
+            {activePatches.map(({ file, patch }) => (
+              <PatchBlock key={file} file={file} patch={patch} />
+            ))}
+          </div>
+        </section>
+
+        <section style={paneShellStyle}>
+          <header style={paneHeader("#831843", "#fdf2f8", "#ec4899")}>Documentation change</header>
+          <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
+            {diffQ.isLoading && <p style={{ padding: 12, color: "#6b7280" }}>Loading doc diff…</p>}
+            {!diffQ.isLoading && !activeDiff && (
+              <p style={{ padding: 12, color: "#6b7280", fontSize: 13 }}>No doc diff for this artifact.</p>
+            )}
+            {activeDiff && <DocDiff diff={activeDiff} />}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
+
+const paneShellStyle = {
+  display: "flex",
+  flexDirection: "column",
+  border: "1px solid #e5e7eb",
+  borderRadius: 8,
+  background: "#fff",
+  overflow: "hidden",
+  minHeight: 0,
+};
 
 function PatchBlock({ file, patch }) {
   const { before, after } = useMemo(() => splitPatch(patch), [patch]);

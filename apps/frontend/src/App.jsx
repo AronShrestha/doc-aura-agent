@@ -60,9 +60,9 @@ function NavBar() {
     <nav className="nav">
       <Link to="/" className="nav-brand">
         <BrandMark size={24} />
-        <span>Aura</span>
+        <span>Doc AURA</span>
       </Link>
-      <span className="nav-tag">Documentation as a byproduct of code changes.</span>
+      <span className="nav-tag">Docs that update themselves on every PR</span>
       <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
         {user ? (
           <>

@@ -26,7 +26,9 @@ in one branch don't leave the DB in an inconsistent state.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from datetime import datetime
 from functools import partial
 from typing import Any, TypedDict
@@ -167,87 +169,125 @@ async def _node_doc_update(session_factory, state: PrOrchestratorState) -> PrOrc
         )
         return {}
 
-    # Match: doc is "affected" if EITHER:
-    #   (a) its source_files intersect a Direct artifact's source_file, OR
-    #   (b) its content_md mentions a Direct artifact's symbol name
-    #       (covers project-level docs that reference symbols by name but
-    #       don't list every source file in their JSON).
-    affected: list[tuple[GeneratedDoc, list[dict[str, Any]], dict[str, str]]] = []
-    direct_by_file: dict[str, list[dict[str, Any]]] = {}
+    # Build inverted indexes once over the canonical docs (O(N_docs × tokens)
+    # at index time; O(1) per Direct artifact lookup at match time).
+    file_to_docs, token_to_docs = _build_doc_indexes(canonical_docs)
+
+    # Walk Direct artifacts and accumulate STRICTLY-affected docs.
+    # Match rule (must satisfy BOTH):
+    #   1. Doc's source_files include the Direct artifact's source_file
+    #      (exact path or basename) — i.e. the doc is *about* code that
+    #      actually changed in the PR.
+    #   2. The Direct artifact's qualified_name OR bare name appears as a
+    #      token in the doc's content — i.e. the doc actually mentions
+    #      the changed symbol.
+    # The strict AND eliminates noise from project-level docs that merely
+    # cross-reference common types (Repo, Session, User) without owning
+    # them, and from doc files that share a category but not a symbol.
+    affected_map: dict[int, dict[str, Any]] = {}  # doc.id → entry
     for art in direct:
         sf = art.get("source_file")
-        if sf:
-            direct_by_file.setdefault(sf, []).append(art)
-
-    direct_names: list[tuple[str, dict[str, Any]]] = []
-    for art in direct:
-        for key in ("name", "qualified_name"):
-            n = art.get(key)
-            if not n:
-                continue
-            short = n.rsplit(".", 1)[-1]
-            for token in {n, short}:
-                if token and len(token) >= 3:
-                    direct_names.append((token, art))
-
-    for doc in canonical_docs:
-        doc_files = set(doc.source_files or [])
-        hit_files = doc_files & direct_files
-        doc_arts: list[dict[str, Any]] = []
-        seen_aids: set[str] = set()
-        for f in hit_files:
-            for art in direct_by_file.get(f, []):
-                aid = art.get("artifact_id")
-                if aid and aid not in seen_aids:
-                    seen_aids.add(aid)
-                    doc_arts.append(art)
-        # name-substring fallback
-        content = doc.content_md or ""
-        if direct_names and content:
-            for token, art in direct_names:
-                if token in content:
-                    aid = art.get("artifact_id")
-                    if aid and aid not in seen_aids:
-                        seen_aids.add(aid)
-                        doc_arts.append(art)
-                    sf = art.get("source_file")
-                    if sf:
-                        hit_files.add(sf)
-        if not doc_arts:
+        if not sf:
             continue
-        doc_patches = {f: code_patches[f] for f in hit_files if f in code_patches}
+        file_hits: set = set()
+        for d in file_to_docs.get(sf, ()):
+            file_hits.add(d)
+        base = sf.rsplit("/", 1)[-1]
+        if base != sf:
+            for d in file_to_docs.get(base, ()):
+                file_hits.add(d)
+        if not file_hits:
+            continue
+        token_hits: set = set()
+        for tok in _direct_tokens(art):
+            for d in token_to_docs.get(tok, ()):
+                token_hits.add(d)
+        confirmed = file_hits & token_hits if token_hits else file_hits
+        # If the artifact has NO meaningful tokens (e.g. category=module),
+        # fall back to file_hits — module docs are about the file itself.
+        if not confirmed:
+            continue
+        for doc in confirmed:
+            entry = affected_map.setdefault(
+                doc.id,
+                {"doc": doc, "arts": [], "art_ids": set(), "files": set()},
+            )
+            aid = art.get("artifact_id")
+            if aid and aid not in entry["art_ids"]:
+                entry["art_ids"].add(aid)
+                entry["arts"].append(art)
+            entry["files"].add(sf)
+
+    affected: list[tuple[GeneratedDoc, list[dict[str, Any]], dict[str, str]]] = []
+    for entry in affected_map.values():
+        doc_patches = {f: code_patches[f] for f in entry["files"] if f in code_patches}
         if not doc_patches:
             continue
-        affected.append((doc, doc_arts, doc_patches))
+        affected.append((entry["doc"], entry["arts"], doc_patches))
 
     if not affected:
         logger.info("no canonical docs intersect direct files", extra={"pr_id": state["pull_request_id"]})
         return {}
 
     llm = _pipeline_llm_client()
+    concurrency = max(1, int(getattr(settings, "llm_max_concurrency", 4)))
+    sem = asyncio.Semaphore(concurrency)
     logger.info(
         "doc updater LLM run starting",
-        extra={"event": "doc_update_llm_start", "pr_id": state["pull_request_id"], "affected_docs": len(affected)},
+        extra={
+            "event": "doc_update_llm_start",
+            "pr_id": state["pull_request_id"],
+            "affected_docs": len(affected),
+            "concurrency": concurrency,
+        },
     )
+
+    async def _one(doc, doc_arts, doc_patches):
+        async with sem:
+            logger.info(
+                "doc updater LLM call",
+                extra={
+                    "event": "doc_update_llm_call",
+                    "pr_id": state["pull_request_id"],
+                    "slug": doc.slug_path,
+                    "patch_files": list(doc_patches.keys()),
+                },
+            )
+            # Strip frontmatter before sending to LLM and before diffing —
+            # so artifact_id / generated_at / content_hash never appear in
+            # the rendered PR diff. Also stops the LLM from echoing them.
+            base_clean = _strip_frontmatter(doc.content_md or "")
+            try:
+                updated = await update_doc_for_change(llm, base_clean, doc_patches, doc_arts)
+            except Exception as exc:
+                logger.warning("doc updater failed for doc", extra={"slug": doc.slug_path, "error": str(exc)})
+                return None
+            updated = _strip_frontmatter(updated or "")
+        return (doc, doc_arts, base_clean, updated)
+
+    results = await asyncio.gather(*[_one(d, a, p) for d, a, p in affected])
     extra_rows: list[dict[str, Any]] = []
-    for doc, doc_arts, doc_patches in affected:
-        logger.info(
-            "doc updater LLM call",
-            extra={"event": "doc_update_llm_call", "pr_id": state["pull_request_id"], "slug": doc.slug_path, "patch_files": list(doc_patches.keys())},
-        )
-        try:
-            updated = await update_doc_for_change(llm, doc.content_md or "", doc_patches, doc_arts)
-        except Exception as exc:
-            logger.warning("doc updater failed for doc", extra={"slug": doc.slug_path, "error": str(exc)})
+    for r in results:
+        if r is None:
             continue
-        if updated.strip() == (doc.content_md or "").strip():
+        doc, doc_arts, base_clean, updated = r
+        if updated.strip() == base_clean.strip():
             logger.info(
                 "doc updater llm returned identical doc",
                 extra={"event": "doc_update_unchanged", "pr_id": state["pull_request_id"], "slug": doc.slug_path},
             )
             continue
-        before_text = doc.content_md or ""
-        extra_rows.append(_build_doc_diff_row(doc, before_text, updated))
+        if not _diff_mentions_direct_symbol(base_clean, updated, doc_arts):
+            logger.info(
+                "doc updater dropped: no direct symbol in diff",
+                extra={
+                    "event": "doc_update_drop_irrelevant",
+                    "pr_id": state["pull_request_id"],
+                    "slug": doc.slug_path,
+                },
+            )
+            continue
+        extra_rows.append(_build_doc_diff_row(doc, base_clean, updated))
 
     merged = (state.get("doc_diffs") or []) + extra_rows
     logger.info(
@@ -255,6 +295,138 @@ async def _node_doc_update(session_factory, state: PrOrchestratorState) -> PrOrc
         extra={"pr_id": state["pull_request_id"], "count": len(extra_rows), "affected_docs": len(affected)},
     )
     return {"doc_diffs": merged}
+
+
+# Strip leading YAML frontmatter (--- ... ---) and any leading naked
+# key: value metadata block before computing diffs / sending to LLM.
+_FRONTMATTER_FENCE = re.compile(r"^---\s*\n.*?\n---\s*\n", re.DOTALL)
+_NAKED_META_LINE = re.compile(
+    r"^(artifact_id|category|name|source_files|source_lines|generated_at|repo_sha|content_hash)\s*:",
+    re.MULTILINE,
+)
+
+
+def _strip_frontmatter(md: str) -> str:
+    if not md:
+        return md
+    out = _FRONTMATTER_FENCE.sub("", md, count=1).lstrip("\n")
+    # Strip a leading run of naked key: value metadata lines (no fence).
+    lines = out.splitlines(keepends=True)
+    keep_from = 0
+    for i, ln in enumerate(lines):
+        stripped = ln.strip()
+        if not stripped:
+            keep_from = i + 1
+            continue
+        if _NAKED_META_LINE.match(stripped):
+            keep_from = i + 1
+            continue
+        break
+    return "".join(lines[keep_from:])
+
+
+# Identifier-like tokens (Python/JS/TS symbol shapes). Excludes pure-numeric.
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_\.]{2,}")
+_STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "with", "this", "that", "from", "into", "any",
+        "all", "not", "but", "use", "uses", "used", "using", "are", "was",
+        "were", "have", "has", "had", "will", "can", "may", "should", "must",
+        "may", "true", "false", "none", "null", "self", "cls", "args", "kwargs",
+        "data", "type", "kind", "name", "value", "field", "fields", "list",
+        "dict", "str", "int", "bool", "float", "object", "class", "function",
+        "module", "method", "param", "params", "return", "returns", "yields",
+        "note", "see", "also", "example", "examples", "input", "output",
+        "result", "results", "default", "optional", "required",
+    }
+)
+
+
+def _tokenize_doc(content: str) -> set[str]:
+    """Extract identifier-shape tokens from doc content. Filters stopwords
+    and very short tokens. Includes both qualified ('a.b.c') and bare
+    ('c') forms so lookup matches either."""
+    if not content:
+        return set()
+    out: set[str] = set()
+    for m in _IDENT_RE.findall(content):
+        if not m:
+            continue
+        out.add(m)
+        if "." in m:
+            tail = m.rsplit(".", 1)[-1]
+            if len(tail) >= 4 and tail.lower() not in _STOPWORDS:
+                out.add(tail)
+    return {t for t in out if t.lower() not in _STOPWORDS and len(t) >= 4}
+
+
+def _direct_tokens(art: dict[str, Any]) -> list[str]:
+    """Lookup tokens for one Direct artifact. Prefer qualified_name (unique)
+    plus the bare last segment if it isn't a common word."""
+    tokens: list[str] = []
+    for key in ("qualified_name", "name"):
+        n = art.get(key)
+        if not n:
+            continue
+        tokens.append(n)
+        tail = n.rsplit(".", 1)[-1]
+        if tail and len(tail) >= 4 and tail.lower() not in _STOPWORDS:
+            tokens.append(tail)
+    return list(dict.fromkeys(tokens))  # dedupe, preserve order
+
+
+def _build_doc_indexes(docs):
+    """Single-pass build of two reverse indexes:
+       - file_to_docs: source_file (or basename) -> list[GeneratedDoc]
+       - token_to_docs: identifier-token -> list[GeneratedDoc]
+    Each doc is added at most once per key. O(N_docs × |content|) total.
+    """
+    file_to_docs: dict[str, list] = {}
+    token_to_docs: dict[str, list] = {}
+    for doc in docs:
+        for f in doc.source_files or []:
+            file_to_docs.setdefault(f, []).append(doc)
+            base = f.rsplit("/", 1)[-1]
+            if base != f:
+                file_to_docs.setdefault(base, []).append(doc)
+        for tok in _tokenize_doc(doc.content_md or ""):
+            token_to_docs.setdefault(tok, []).append(doc)
+    return file_to_docs, token_to_docs
+
+
+def _diff_mentions_direct_symbol(
+    before_md: str,
+    after_md: str,
+    doc_arts: list[dict[str, Any]],
+) -> bool:
+    """True if the LLM's edit set mentions any Direct artifact's name/qualified_name.
+    Filters out whitespace-only or unrelated rephrasings."""
+    import difflib
+
+    tokens: set[str] = set()
+    for art in doc_arts:
+        for key in ("name", "qualified_name"):
+            n = art.get(key)
+            if not n:
+                continue
+            tokens.add(n)
+            short = n.rsplit(".", 1)[-1]
+            if short and len(short) >= 3:
+                tokens.add(short)
+    if not tokens:
+        return True  # be permissive if we have no symbol info
+    diff_iter = difflib.unified_diff(before_md.splitlines(), after_md.splitlines(), lineterm="")
+    changed: list[str] = []
+    for ln in diff_iter:
+        if ln.startswith("+++") or ln.startswith("---") or ln.startswith("@@"):
+            continue
+        if ln.startswith("+") or ln.startswith("-"):
+            changed.append(ln[1:])
+    for line in changed:
+        for tok in tokens:
+            if tok and tok in line:
+                return True
+    return False
 
 
 def _build_doc_diff_row(doc: GeneratedDoc, before_text: str, after_text: str) -> dict[str, Any]:

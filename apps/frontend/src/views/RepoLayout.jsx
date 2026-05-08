@@ -64,7 +64,7 @@ export function RepoLayout() {
           <Tab to={`/repos/${repoId}/prs`} label="Pull requests" />
         </nav>
       </header>
-      <div style={{ flex: 1, overflow: "auto" }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
         {!repo && reposQ.isFetched ? (
           <div style={{ padding: 24, color: "#6b7280" }}>Repository not found.</div>
         ) : (

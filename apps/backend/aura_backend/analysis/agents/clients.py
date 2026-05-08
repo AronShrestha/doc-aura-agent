@@ -78,18 +78,22 @@ class OpenAIChatClient:
         # response time). Streaming means slow generation no longer trips a
         # whole-response timeout.
         timeout = httpx.Timeout(
-            connect=10.0,
+            connect=float(os.getenv("LLM_CONNECT_TIMEOUT", "30")),
             read=float(self.timeout_seconds),
             write=30.0,
-            pool=10.0,
+            pool=float(os.getenv("LLM_POOL_TIMEOUT", "30")),
+        )
+        limits = httpx.Limits(
+            max_connections=int(os.getenv("LLM_MAX_CONNECTIONS", "64")),
+            max_keepalive_connections=int(os.getenv("LLM_KEEPALIVE_CONNECTIONS", "32")),
         )
 
-        max_attempts = 4
-        backoff = 2.0
+        max_attempts = int(os.getenv("LLM_MAX_ATTEMPTS", "6"))
+        backoff = float(os.getenv("LLM_BACKOFF_BASE", "1.5"))
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
+                async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
                     async with client.stream(
                         "POST",
                         f"{self.base_url}/chat/completions",
@@ -151,11 +155,28 @@ class OpenAIChatClient:
                                 chunks.append(piece)
                 logger.info("llm request succeeded", extra={"event": "llm_response", "attempt": attempt})
                 return "".join(chunks)
-            except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            except (
+                httpx.TimeoutException,   # ConnectTimeout, ReadTimeout, WriteTimeout, PoolTimeout
+                httpx.NetworkError,       # ConnectError, ReadError, WriteError, CloseError
+                httpx.ProtocolError,      # RemoteProtocolError, LocalProtocolError
+            ) as exc:
                 last_exc = exc
-                logger.warning("llm network error", extra={"event": "llm_retry", "attempt": attempt, "error": str(exc)})
+                # exponential backoff with jitter so concurrent retries don't synchronize
+                import random
+                delay = (backoff ** attempt) + random.uniform(0, 0.5)
+                logger.warning(
+                    "llm network error",
+                    extra={
+                        "event": "llm_retry",
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "next_delay_s": round(delay, 2),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
                 if attempt < max_attempts:
-                    await asyncio.sleep(backoff * attempt)
+                    await asyncio.sleep(delay)
                     continue
                 raise
         if last_exc:

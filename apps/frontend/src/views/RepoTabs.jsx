@@ -44,7 +44,7 @@ export function RepoPrDetailTab() {
   const subTab = useSubTab();
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       <div
         style={{
           padding: "8px 16px",
@@ -52,6 +52,7 @@ export function RepoPrDetailTab() {
           borderBottom: "1px solid #e5e7eb",
           display: "flex",
           gap: 6,
+          flexShrink: 0,
         }}
       >
         <SubTabBtn active={subTab === "docs"} onClick={() => setSubTabHash("docs")}>
@@ -61,7 +62,7 @@ export function RepoPrDetailTab() {
           💥 Blast radius
         </SubTabBtn>
       </div>
-      <div style={{ flex: 1, overflow: "auto" }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
         {subTab === "docs" && <PrDiffView pullRequestIdOverride={pullRequestId} />}
         {subTab === "blast" && (
           canonicalRunId ? (

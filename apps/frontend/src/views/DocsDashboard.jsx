@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useQueryClient } from "@tanstack/react-query";
 
-import { useDoc, useDocs, useRun } from "../api";
+import { reAnalyzeRepoDocs, useDoc, useDocs, useRun } from "../api";
 import { VerifiedBadge } from "../components/VerifiedBadge";
 import { RunProgress } from "../components/RunProgress";
 import { Mermaid } from "../components/Mermaid";
 import { AgentActivity } from "../components/AgentActivity";
-import { GithubGlyph, repoUrl } from "../components/BrandMark";
+import { DocsIcon, GithubGlyph, repoUrl } from "../components/BrandMark";
+import { DocChat } from "../components/DocChat";
 
 /**
  * /runs/:runId — left rail of project-level docs rendered as a hierarchical
@@ -22,10 +23,26 @@ export function DocsDashboard({ runIdOverride } = {}) {
   const runId = runIdOverride ?? params.runId;
   const numericRunId = Number(runId);
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const runQ = useRun(numericRunId);
   const repoId = runQ.data?.repo_id;
   const docsQ = useDocs(repoId);
   const prevStatusRef = useRef(null);
+  const [reAnalyzing, setReAnalyzing] = useState(false);
+
+  async function handleReAnalyzeDocs() {
+    if (!repoId || reAnalyzing) return;
+    setReAnalyzing(true);
+    try {
+      const { run_id } = await reAnalyzeRepoDocs(repoId);
+      queryClient.invalidateQueries({ queryKey: ["my-repos"] });
+      navigate(`/runs/${run_id}`);
+    } catch (err) {
+      console.error("re-analyze docs failed", err);
+    } finally {
+      setReAnalyzing(false);
+    }
+  }
 
   // When the run transitions into a terminal state, force-refetch docs index
   // + active doc so the UI swaps from activity feed → real documentation
@@ -64,6 +81,7 @@ export function DocsDashboard({ runIdOverride } = {}) {
   }, [sections]);
   const [activeId, setActiveId] = useState(null);
   const [search, setSearch] = useState("");
+  const [chatOpen, setChatOpen] = useState(true);
   const docQ = useDoc(repoId, activeId);
 
   // Auto-select first available doc once sections load.
@@ -93,6 +111,25 @@ export function DocsDashboard({ runIdOverride } = {}) {
               <Link to={`/runs/${runId}/graph`} style={{ fontSize: 12, fontWeight: 500 }}>
                 graph →
               </Link>
+              {repoId && (
+                <button
+                  onClick={handleReAnalyzeDocs}
+                  disabled={reAnalyzing}
+                  title="Run a fresh canonical analysis on the default branch"
+                  style={{
+                    marginLeft: "auto",
+                    padding: "3px 8px",
+                    borderRadius: 6,
+                    border: "1px solid #d1d5db",
+                    background: reAnalyzing ? "#f3f4f6" : "#fff",
+                    color: reAnalyzing ? "#9ca3af" : "#374151",
+                    cursor: reAnalyzing ? "wait" : "pointer",
+                    fontSize: 11,
+                  }}
+                >
+                  {reAnalyzing ? "↻…" : "↻ Re-analyze"}
+                </button>
+              )}
             </div>
             {run?.repo_full_name && (
               <a
@@ -145,16 +182,29 @@ export function DocsDashboard({ runIdOverride } = {}) {
 
         <main className="doc-main">
           <div className="doc-inner">
-            {activeSection && (
-              <div className="doc-breadcrumbs">
-                {breadcrumbsFor(activeSection.slug_path).map((part, i, arr) => (
-                  <span key={i} style={i === arr.length - 1 ? { color: "var(--fg)" } : undefined}>
-                    {part}
-                    {i < arr.length - 1 && <span className="crumb-sep" style={{ margin: "0 6px" }}>/</span>}
-                  </span>
-                ))}
-              </div>
-            )}
+            <div className="doc-topbar">
+              {activeSection ? (
+                <div className="doc-breadcrumbs">
+                  {breadcrumbsFor(activeSection.slug_path).map((part, i, arr) => (
+                    <span key={i} style={i === arr.length - 1 ? { color: "var(--fg)" } : undefined}>
+                      {part}
+                      {i < arr.length - 1 && <span className="crumb-sep" style={{ margin: "0 6px" }}>/</span>}
+                    </span>
+                  ))}
+                </div>
+              ) : <span />}
+              {!chatOpen && (
+                <button
+                  className="chat-toggle-btn"
+                  onClick={() => setChatOpen(true)}
+                  title="Open docs chat"
+                >
+                  <DocsIcon size={16} />
+                  <span>Ask docs</span>
+                </button>
+              )}
+            </div>
+
 
             {docQ.isLoading && <DocSkeleton />}
             {docQ.error && (
@@ -183,6 +233,27 @@ export function DocsDashboard({ runIdOverride } = {}) {
             )}
           </div>
         </main>
+
+        {chatOpen && (
+          <aside className="chat-sidebar">
+            <DocChat
+              repoId={repoId}
+              activeDocId={activeId}
+              activeDocTitle={activeSection?.title}
+              onNavigateDoc={(id, anchor) => {
+                setActiveId(id);
+                if (anchor) {
+                  // Defer until the new doc renders.
+                  setTimeout(() => {
+                    const el = document.getElementById(anchor);
+                    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }, 250);
+                }
+              }}
+              onClose={() => setChatOpen(false)}
+            />
+          </aside>
+        )}
       </div>
     </div>
   );

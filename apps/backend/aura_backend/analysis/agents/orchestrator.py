@@ -137,18 +137,34 @@ async def run_documentation_agents(
                 extra={"repo_id": snapshot.repo_id, "doc_type_id": planned.doc_type_id},
             )
             return None
-        async with sem:
-            draft = await run_project_doc_writer(
-                llm_client,
-                snapshot,
-                planned,
-                spec,
-                aggs,
-                repo_analysis,
-                visual_context,
-                generated_at,
-                human_docs=human_docs,
+        try:
+            async with sem:
+                draft = await run_project_doc_writer(
+                    llm_client,
+                    snapshot,
+                    planned,
+                    spec,
+                    aggs,
+                    repo_analysis,
+                    visual_context,
+                    generated_at,
+                    human_docs=human_docs,
+                )
+        except Exception as exc:
+            # One doc failing must not abort the whole pipeline. Log and
+            # skip; verifier later flags coverage gaps.
+            logger.warning(
+                "doc writer failed; skipping doc",
+                extra={
+                    "event": "doc_writer_failed",
+                    "repo_id": snapshot.repo_id,
+                    "doc_type_id": spec.id,
+                    "slug_path": planned.target_path,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
             )
+            draft = None
         completed += 1
         pct = _PROG_COMPOSE_START + int(completed / total * span)
         narration: str | None = None
@@ -167,8 +183,14 @@ async def run_documentation_agents(
         )
         return draft
 
-    results = await asyncio.gather(*[_one(p) for p in composable])
+    results = await asyncio.gather(*[_one(p) for p in composable], return_exceptions=False)
     docs: list[GeneratedDocDraft] = [d for d in results if d is not None]
+    failed = sum(1 for r in results if r is None)
+    if failed:
+        logger.warning(
+            "compose finished with failures",
+            extra={"event": "compose_partial", "failed": failed, "total": len(results)},
+        )
 
     # Drain any narration lines we didn't place yet (paced rounding leftover).
     while narration_idx < len(narration_lines):

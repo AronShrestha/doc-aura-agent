@@ -75,6 +75,29 @@ class SearchRequest(BaseModel):
     top_k: int = 20
 
 
+class DocChatHistoryItem(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class DocChatRequest(BaseModel):
+    message: str = Field(min_length=1)
+    active_doc_id: str | None = None
+    history: list[DocChatHistoryItem] = Field(default_factory=list)
+
+
+class DocChatLink(BaseModel):
+    doc_id: str
+    title: str
+    anchor: str | None = None
+    section_title: str | None = None
+
+
+class DocChatResponse(BaseModel):
+    answer: str
+    links: list[DocChatLink] = Field(default_factory=list)
+
+
 class Provenance(BaseModel):
     source_file: str
     source_line_start: int | None = None

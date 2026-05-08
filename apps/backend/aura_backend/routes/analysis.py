@@ -1,13 +1,15 @@
 from __future__ import annotations
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import get_session
+from ..db import SessionLocal, get_session
 from ..deps import current_user
 from ..models import GithubInstallation, GithubOAuthToken, Repo, AnalysisRun, DocSection, Artifact, ArtifactEdge, GeneratedDoc, PullRequest, PrAnalysisRun, DocDiff, User
-from ..schemas import AnalyzeRepoRequest, AnalyzeRepoResponse, RunResponse, SearchRequest, DocSectionResponse, GeneratedDocResponse
+from ..schemas import AnalyzeRepoRequest, AnalyzeRepoResponse, RunResponse, SearchRequest, DocSectionResponse, GeneratedDocResponse, DocChatRequest, DocChatResponse
+from ..analysis.agents.docs_chat import answer_docs_question
+from ..analysis.pipeline import _pipeline_llm_client
 from ..services.github_app import (
     GithubAppError,
     build_app_jwt,
@@ -15,6 +17,7 @@ from ..services.github_app import (
     list_installation_repositories,
 )
 from ..services.github_oauth import list_user_repositories
+from ..services.pr_orchestrator import run_pr_orchestrator
 from ..config import settings
 
 router = APIRouter(prefix="/api/v1", tags=["analysis"])
@@ -196,6 +199,15 @@ async def docs_search(repo_id: int, req: SearchRequest, user=Depends(current_use
 
     hits.sort(key=lambda x: x["score"], reverse=True)
     return {"results": hits[: req.top_k]}
+
+
+@router.post("/repos/{repo_id}/docs/chat", response_model=DocChatResponse)
+async def docs_chat(repo_id: int, req: DocChatRequest, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
+    logger.debug("docs chat requested", extra={"repo_id": repo_id, "event": "docs_chat"})
+    run = await _latest_run(session, repo_id, user)
+    docs = (await session.execute(select(GeneratedDoc).where(GeneratedDoc.run_id == run.id))).scalars().all()
+    llm = _pipeline_llm_client()
+    return await answer_docs_question(llm, req, list(docs))
 
 
 @router.get("/repos/{repo_id}/artifacts/{artifact_id}")
@@ -530,6 +542,53 @@ async def pr_affected_docs(pull_request_id: int, user=Depends(current_user), ses
             for d in items
         ],
     }
+
+
+@router.post("/pull-requests/{pull_request_id}/re-analyze")
+async def pr_re_analyze(
+    pull_request_id: int,
+    background: BackgroundTasks,
+    user=Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Fire the PR orchestrator again for an existing PR, in the background."""
+    logger.info("pr re-analyze requested", extra={"pr_id": pull_request_id, "event": "pr_re_analyze"})
+    pr = (await session.execute(select(PullRequest).where(PullRequest.id == pull_request_id))).scalar_one_or_none()
+    if not pr:
+        raise HTTPException(status_code=404, detail="pr_not_found")
+    repo = (
+        await session.execute(select(Repo).where(Repo.id == pr.repo_id, Repo.user_id == user.id))
+    ).scalar_one_or_none()
+    if not repo:
+        raise HTTPException(status_code=404, detail="pr_not_found")
+    background.add_task(run_pr_orchestrator, SessionLocal, pull_request_id)
+    return {"status": "queued", "pull_request_id": pull_request_id}
+
+
+@router.post("/repos/{repo_id}/re-analyze")
+async def repo_re_analyze(
+    repo_id: int,
+    user=Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Kick off a fresh canonical AnalysisRun on the repo's default branch."""
+    logger.info("repo re-analyze requested", extra={"repo_id": repo_id, "event": "repo_re_analyze"})
+    repo = await _user_repo(session, repo_id, user)
+    run = AnalysisRun(
+        repo_id=repo.id,
+        user_id=user.id,
+        status="queued",
+        stage="queued",
+        progress=0,
+        branch=repo.default_branch,
+        commit_sha="",
+    )
+    session.add(run)
+    await session.commit()
+    from ..main import app_state
+    await app_state.queue.start()
+    await app_state.queue.enqueue(run.id)
+    return {"status": "queued", "run_id": run.id, "repo_id": repo.id}
 
 
 @router.get("/pull-requests/{pull_request_id}/impact")

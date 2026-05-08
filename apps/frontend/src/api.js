@@ -169,6 +169,19 @@ export function useAffectedDocs(pullRequestId) {
   });
 }
 
+export async function reAnalyzePr(pullRequestId) {
+  return (await client.post(`/pull-requests/${pullRequestId}/re-analyze`)).data;
+}
+
+export async function reAnalyzeRepoDocs(repoId) {
+  return (await client.post(`/repos/${repoId}/re-analyze`)).data;
+}
+
+export async function postDocChat(repoId, payload) {
+  const { data } = await client.post(`/repos/${repoId}/docs/chat`, payload);
+  return data;
+}
+
 export function useGeneratedDoc(repoId, artifactId) {
   return useQuery({
     queryKey: ["gen-doc", repoId, artifactId],
