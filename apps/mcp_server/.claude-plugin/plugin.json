@@ -1,0 +1,7 @@
+{
+  "name": "aura",
+  "version": "0.1.0",
+  "description": "Doc AURA — living documentation that evolves with your codebase. Exposes generated docs, code graph, and PR change impact over MCP.",
+  "homepage": "https://github.com/docsumo/doc-aura",
+  "keywords": ["documentation", "mcp", "code-graph", "pr-review"]
+}

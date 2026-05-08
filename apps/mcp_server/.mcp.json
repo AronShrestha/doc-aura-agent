@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "aura": {
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "env": {
+        "PYTHONPATH": "${CLAUDE_PROJECT_DIR}/apps:${CLAUDE_PROJECT_DIR}/apps/backend",
+        "AURA_DB_URL": "sqlite+aiosqlite:///${CLAUDE_PROJECT_DIR}/aura.db",
+        "EMBEDDING_BASE_URL": "${EMBEDDING_BASE_URL}",
+        "EMBEDDING_MODEL": "${EMBEDDING_MODEL}"
+      }
+    }
+  }
+}
