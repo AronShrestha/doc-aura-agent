@@ -16,7 +16,7 @@ class LoginRequest(BaseModel):
 class UserPublic(BaseModel):
     id: int
     email: EmailStr
-    display_name: str | None = None
+    display_name: str | None = "Ash"
 
 
 class AuthResponse(BaseModel):
