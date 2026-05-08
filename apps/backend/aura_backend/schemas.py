@@ -1,5 +1,48 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from typing import Literal
+
+
+class SignupRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=256)
+    display_name: str | None = Field(default=None, max_length=255)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=256)
+
+
+class UserPublic(BaseModel):
+    id: int
+    email: EmailStr
+    display_name: str | None = None
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    user: UserPublic
+
+
+class MeResponse(BaseModel):
+    id: int
+    email: EmailStr
+    display_name: str | None = None
+    github_linked: bool
+    github_login: str | None = None
+
+
+class RepoSummary(BaseModel):
+    repo_id: int
+    github_repo_id: str
+    full_name: str
+    default_branch: str
+    latest_run: dict | None = None
+
+
+class MyReposResponse(BaseModel):
+    repos: list[RepoSummary]
 
 
 class AnalyzeRepoRequest(BaseModel):
@@ -18,11 +61,13 @@ class AnalyzeRepoResponse(BaseModel):
 class RunResponse(BaseModel):
     run_id: int
     repo_id: int
+    repo_full_name: str | None = None
     status: str
     stage: str
     progress: int
     error: str | None = None
     quality_report: dict | None = None
+    activity: list[dict] | None = None
 
 
 class SearchRequest(BaseModel):

@@ -4,7 +4,7 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 
 from aura_backend.main import app
-from aura_backend.db import engine
+from aura_backend.db import engine, ensure_columns
 from aura_backend.models import Base, AnalysisRun
 from aura_backend.routes import auth as auth_routes
 from aura_backend.routes import github as github_routes
@@ -15,6 +15,7 @@ from aura_backend.analysis import pipeline as analysis_pipeline
 async def _init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await ensure_columns(conn)
 
 
 @pytest.mark.asyncio
@@ -88,11 +89,20 @@ async def test_auth_and_analysis_flow():
         system = messages[0]["content"]
         if "Repo Analyst Agent" in system:
             return '{"architecture_summary":"FastAPI service","frameworks":["fastapi"],"risk_areas":[],"artifact_groups":[],"human_docs_summary":"","media_assets_summary":"","documentation_opportunities":["api reference"]}'
-        if "Doc Planner Agent" in system:
-            return '{"rationale":"Document API and architecture.","docs":[{"doc_id":"project-doc","title":"Project Overview","category":"project","diataxis_type":"explanation","target_path":".aura/docs/project-overview.md","source_artifact_ids":[],"uses_vlm_context":false,"priority":100,"writer":"system","rationale":"baseline"}]}'
+        if "Project Doc Planner" in system:
+            return (
+                '{"codebase_profile":{"type":"api","primary_language":"python",'
+                '"summary":"FastAPI service","subprojects":[]},'
+                '"doc_plan":[{"doc_type_id":"overview","title":"Project Overview","rationale":"baseline"},'
+                '{"doc_type_id":"api-endpoints","title":"API Reference","rationale":"endpoints"}],'
+                '"rationale":"Document API and architecture."}'
+            )
         if "Verifier Agent" in system:
             return '{"passed":true,"citation_coverage":1.0,"unsupported_claims":0,"section_completeness":1.0,"issues":[]}'
-        return "# Generated\n\nStatic documentation.\n\n## Source Provenance\n\n- main.py"
+        return (
+            "# Generated\n\nStatic documentation [verified: main.py:L1-L8].\n\n"
+            "## Source Provenance\n\n- main.py:L1-L8\n"
+        )
 
     analysis_pipeline._fetch_repo_zip = _fake_fetch
     analysis_pipeline._llm_chat = _fake_llm

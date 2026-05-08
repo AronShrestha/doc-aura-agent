@@ -7,6 +7,14 @@
 node_modules/
 dist/
 
+.aura/
+checkouts/
+
+.claude/
+*.bak
+aura.db*
+
+
 # Created by https://www.toptal.com/developers/gitignore/api/python,node,react
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,node,react
 

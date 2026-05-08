@@ -5,12 +5,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .db import engine
+from .db import engine, ensure_columns
 from .models import Base
 from .services.queue import RunQueue
 from .routes.auth import router as auth_router
 from .routes.github import router as github_router
 from .routes.analysis import router as analysis_router
+from .routes.users import router as users_router
 from .routes.webhooks import router as webhooks_router
 from .config import settings
 from .logging_config import configure_logging
@@ -34,6 +35,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(users_router)
 app.include_router(auth_router)
 app.include_router(github_router)
 app.include_router(analysis_router)
@@ -51,6 +53,7 @@ async def startup():
     logger.info("backend startup started", extra={"event": "startup"})
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await ensure_columns(conn)
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     app_state.queue = RunQueue(factory)

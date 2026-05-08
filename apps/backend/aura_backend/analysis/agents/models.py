@@ -35,19 +35,34 @@ class PlannedDoc:
     doc_id: str
     title: str
     category: str
-    diataxis_type: Literal["reference", "explanation", "how-to"]
+    diataxis_type: Literal["reference", "explanation", "how-to", "tutorial"]
     target_path: str
+    doc_type_id: str = ""
+    required_aggregations: list[str] = field(default_factory=list)
     source_artifact_ids: list[str] = field(default_factory=list)
     uses_vlm_context: bool = False
     priority: int = 50
-    writer: Literal["artifact", "system"] = "system"
+    writer: Literal["artifact", "system", "project"] = "project"
     rationale: str = ""
+    # When set, narrows aggregation context to a single entity. Shape:
+    # {"kind": "data_model"|"env_var"|"endpoint"|"config_file"|"module",
+    #  "key": <stable identifier>}.
+    entity_focus: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class CodebaseProfile:
+    type: str
+    primary_language: str
+    summary: str
+    subprojects: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class DocumentationPlan:
     docs: list[PlannedDoc]
     rationale: str
+    codebase_profile: CodebaseProfile | None = None
 
 
 @dataclass(slots=True)

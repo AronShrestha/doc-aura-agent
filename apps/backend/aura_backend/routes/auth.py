@@ -1,28 +1,62 @@
 from __future__ import annotations
 import logging
 import secrets
-from urllib.parse import urlencode
-from fastapi import APIRouter, Depends, Response, HTTPException, Request
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode, urlparse
+
+import jwt
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import get_session
-from ..models import User, Session, GithubOAuthToken
 from ..config import settings
-from ..services.github_oauth import exchange_code_for_token, fetch_github_user, GithubOAuthError
+from ..db import get_session
+from ..deps import current_user
+from ..models import GithubOAuthToken, User
+from ..services.github_oauth import (
+    GithubOAuthError,
+    exchange_code_for_token,
+    fetch_github_user,
+)
 
-router = APIRouter(prefix="/api/v1/auth/github", tags=["auth"])
+
+router = APIRouter(prefix="/api/v1/auth/github", tags=["github-link"])
 logger = logging.getLogger(__name__)
 
 
+_STATE_AUDIENCE = "github_oauth_state"
+
+
+def _encode_state(user_id: int) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "aud": _STATE_AUDIENCE,
+        "nonce": secrets.token_urlsafe(16),
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=10)).timestamp()),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def _decode_state(token: str) -> int:
+    payload = jwt.decode(
+        token,
+        settings.jwt_secret,
+        algorithms=[settings.jwt_algorithm],
+        audience=_STATE_AUDIENCE,
+    )
+    return int(payload["sub"])
+
+
 @router.get("/start")
-async def github_auth_start():
-    logger.info("github oauth start requested", extra={"event": "github_auth_start"})
+async def github_link_start(user: User = Depends(current_user)):
+    logger.info("github link start", extra={"user_id": user.id, "event": "github_link_start"})
     if not settings.github_client_id:
         raise HTTPException(status_code=500, detail="github_oauth_not_configured")
 
-    state = secrets.token_urlsafe(24)
+    state = _encode_state(user.id)
     query = urlencode(
         {
             "client_id": settings.github_client_id,
@@ -32,24 +66,28 @@ async def github_auth_start():
         }
     )
     auth_url = f"https://github.com/login/oauth/authorize?{query}"
-    res = JSONResponse({"auth_url": auth_url})
-    res.set_cookie("aura_auth_state", state, httponly=True, samesite="lax")
-    return res
+    return JSONResponse({"auth_url": auth_url})
 
 
 @router.get("/callback")
-async def github_auth_callback(
+async def github_link_callback(
     request: Request,
     code: str | None = None,
     state: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
-    logger.info("github oauth callback received", extra={"event": "github_auth_callback"})
-    if not code:
-        raise HTTPException(status_code=400, detail="missing_code")
-    state_cookie = request.cookies.get("aura_auth_state")
-    if not state or not state_cookie or state != state_cookie:
-        raise HTTPException(status_code=400, detail="invalid_state")
+    logger.info("github link callback", extra={"event": "github_link_callback"})
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="missing_code_or_state")
+
+    try:
+        user_id = _decode_state(state)
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=400, detail="invalid_state") from exc
+
+    user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="user_not_found")
 
     try:
         access_token = await exchange_code_for_token(
@@ -61,49 +99,23 @@ async def github_auth_callback(
         github_user = await fetch_github_user(access_token)
     except GithubOAuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - upstream
         raise HTTPException(status_code=502, detail="github_oauth_upstream_error") from exc
 
-    github_user_id = str(github_user["id"])
-    login = github_user["login"]
+    user.github_user_id = str(github_user["id"])
+    user.login = github_user["login"]
 
-    user = (await session.execute(select(User).where(User.github_user_id == github_user_id))).scalar_one_or_none()
-    if not user:
-        user = User(github_user_id=github_user_id, login=login)
-        session.add(user)
-        await session.flush()
-
-    token = secrets.token_urlsafe(24)
-    sess = Session(user_id=user.id, token=token)
-    session.add(sess)
-
-    oauth_row = (await session.execute(select(GithubOAuthToken).where(GithubOAuthToken.user_id == user.id))).scalar_one_or_none()
+    oauth_row = (
+        await session.execute(select(GithubOAuthToken).where(GithubOAuthToken.user_id == user.id))
+    ).scalar_one_or_none()
     if oauth_row:
         oauth_row.access_token = access_token
     else:
         session.add(GithubOAuthToken(user_id=user.id, access_token=access_token))
     await session.commit()
-    logger.info("github oauth callback succeeded", extra={"event": "github_auth_success"})
+    logger.info("github link success", extra={"user_id": user.id, "event": "github_link_success"})
 
+    redirect = settings.frontend_url.rstrip("/") + "/?github_linked=1"
     res = Response(status_code=302)
-    res.headers["Location"] = settings.frontend_url
-    res.set_cookie("aura_session", token, httponly=True, samesite="lax")
-    res.delete_cookie("aura_auth_state")
+    res.headers["Location"] = redirect
     return res
-
-
-async def current_user(request: Request, session: AsyncSession = Depends(get_session)) -> User:
-    token = request.cookies.get("aura_session")
-    if not token:
-        raise HTTPException(status_code=401, detail="unauthorized")
-    sess = (await session.execute(select(Session).where(Session.token == token))).scalar_one_or_none()
-    if not sess:
-        raise HTTPException(status_code=401, detail="unauthorized")
-    user = (await session.execute(select(User).where(User.id == sess.user_id))).scalar_one()
-    return user
-
-
-@router.get("/me")
-async def github_auth_me(user: User = Depends(current_user)):
-    logger.debug("auth me requested", extra={"event": "github_auth_me"})
-    return {"id": user.id, "login": user.login}

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import shutil
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,14 +35,81 @@ from .types import AnalysisResult, ExtractedArtifact, ExtractedEdge, GeneratedDo
 logger = logging.getLogger(__name__)
 
 STAGES = [
-    ("acquire", 10),
-    ("parse", 25),
-    ("extract", 50),
-    ("synthesize", 75),
+    ("acquire", 8),
+    ("parse", 20),
+    ("extract", 40),
+    ("synthesize", 88),
     ("persist", 95),
 ]
 
 CHECKOUT_ROOT = BASE_DIR / ".aura" / "checkouts"
+
+
+_ACTIVITY_CAP = 200
+_ACTIVITY_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _activity_lock(run_id: int) -> asyncio.Lock:
+    lock = _ACTIVITY_LOCKS.get(run_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ACTIVITY_LOCKS[run_id] = lock
+    return lock
+
+
+async def _log_activity(
+    session_factory: async_sessionmaker,
+    run_id: int,
+    kind: str,
+    message: str,
+    meta: dict[str, Any] | None = None,
+) -> None:
+    if not message:
+        return
+    async with _activity_lock(run_id):
+        async with session_factory() as session:
+            run = (await session.execute(select(AnalysisRun).where(AnalysisRun.id == run_id))).scalar_one_or_none()
+            if not run:
+                return
+            entries = list(run.activity or [])
+            entries.append(
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "kind": kind,
+                    "message": message,
+                    "meta": meta or None,
+                }
+            )
+            if len(entries) > _ACTIVITY_CAP:
+                entries = entries[-_ACTIVITY_CAP:]
+            run.activity = entries
+            await session.commit()
+
+
+_STAGE_TEMPLATES = {
+    "acquire": "Cloning repository",
+    "parse": "Parsing source files",
+    "extract": "Extracting symbols, routes, and data models",
+    "synthesize": "Dispatching agents",
+    "persist": "Saving documentation",
+    "aggregate": "Mapping repository surface — {endpoints} endpoints, {data_models} models, {env_vars} env vars",
+    "vlm_context": "Reviewing {vlm_count} diagrams",
+    "analyst": "Analyst agent forming an architecture overview",
+    "plan": "Planning {planned_doc_count} documents for a {codebase_type} project",
+    "compose": "Drafting doc {doc} — {slug_path}",
+    "verify": "Verifier agent checking citations",
+}
+
+
+def _format_stage_message(stage: str, extra: dict[str, Any]) -> str:
+    template = _STAGE_TEMPLATES.get(stage)
+    if not template:
+        return ""
+    safe = {k: (v if v is not None else "—") for k, v in (extra or {}).items()}
+    try:
+        return template.format(**{**{k: "—" for k in ("endpoints", "data_models", "env_vars", "vlm_count", "planned_doc_count", "codebase_type", "doc", "slug_path")}, **safe})
+    except (KeyError, IndexError):
+        return template
 
 
 async def _set_stage(session_factory: async_sessionmaker, run_id: int, stage: str, progress: int) -> None:
@@ -60,11 +129,14 @@ async def run_analysis(run_id: int, session_factory: async_sessionmaker) -> None
             run.status = "running"
             run.stage = "acquire"
             run.progress = 2
+            run.activity = []
             await session.commit()
+        await _log_activity(session_factory, run_id, "stage", "Run started")
 
         result: AnalysisResult | None = None
         for stage, progress in STAGES:
             await _set_stage(session_factory, run_id, stage, progress)
+            await _log_activity(session_factory, run_id, "stage", _format_stage_message(stage, {}))
             if stage == "acquire":
                 root, repo, run = await _acquire_checkout(session_factory, run_id)
             elif stage == "parse":
@@ -82,6 +154,18 @@ async def run_analysis(run_id: int, session_factory: async_sessionmaker) -> None
             elif stage == "synthesize":
                 llm_client = _pipeline_llm_client()
                 vlm_client = _pipeline_vlm_client()
+
+                async def _progress_cb(sub_stage: str, pct: int, extra=None) -> None:
+                    await _set_stage(session_factory, run_id, sub_stage, pct)
+                    extra = extra or {}
+                    msg = _format_stage_message(sub_stage, extra)
+                    if msg:
+                        kind = "writer" if sub_stage == "compose" else "stage"
+                        await _log_activity(session_factory, run_id, kind, msg, extra)
+                    narration_line = (extra or {}).get("narration")
+                    if narration_line:
+                        await _log_activity(session_factory, run_id, "narration", narration_line, None)
+
                 docs, quality = await run_documentation_agents(
                     snapshot,
                     artifacts,
@@ -91,8 +175,9 @@ async def run_analysis(run_id: int, session_factory: async_sessionmaker) -> None
                     vlm_client,
                     vlm_enabled=settings.vlm_enabled,
                     max_artifacts=settings.agent_max_artifacts,
+                    progress_cb=_progress_cb,
                 )
-                manifest = quality.pop("manifest")
+                manifest = quality["manifest"]
                 write_docs(root, docs, manifest)
                 logger.info(
                     "agent docs generated",
@@ -104,6 +189,12 @@ async def run_analysis(run_id: int, session_factory: async_sessionmaker) -> None
                     raise RuntimeError("analysis_result_missing")
                 await _persist_result(session_factory, run_id, result)
                 logger.info("analysis run succeeded", extra={"run_id": run_id, "repo_id": repo.id, "stage": "done"})
+        await _log_activity(
+            session_factory,
+            run_id,
+            "stage",
+            f"Documentation ready — {len(result.docs) if result else 0} sections published",
+        )
     except Exception as exc:
         logger.exception("analysis run failed", extra={"run_id": run_id})
         async with session_factory() as session:
@@ -114,6 +205,9 @@ async def run_analysis(run_id: int, session_factory: async_sessionmaker) -> None
                 run.progress = 100
                 run.error = str(exc)
                 await session.commit()
+        await _log_activity(session_factory, run_id, "stage", f"Run failed — {exc}")
+    finally:
+        _ACTIVITY_LOCKS.pop(run_id, None)
 
 
 async def run_static_analysis_for_ref(
@@ -144,18 +238,33 @@ async def _acquire_checkout(session_factory: async_sessionmaker, run_id: int) ->
     async with session_factory() as session:
         run = (await session.execute(select(AnalysisRun).where(AnalysisRun.id == run_id))).scalar_one()
         repo = (await session.execute(select(Repo).where(Repo.id == run.repo_id))).scalar_one()
-        token = await _repo_token(session_factory, repo)
+        token = await _repo_token(session_factory, repo, run)
     root = await _fetch_repo_zip(repo, run, token)
     logger.info("checkout acquired", extra={"run_id": run_id, "repo_id": repo.id, "stage": "acquire"})
     return root, repo, run
 
 
-async def _repo_token(session_factory: async_sessionmaker, repo: Repo) -> str:
+async def _repo_token(session_factory: async_sessionmaker, repo: Repo, run: AnalysisRun) -> str:
     if repo.installation_id and repo.installation_id != "oauth":
         app_jwt = build_app_jwt(settings.github_app_id, settings.github_app_private_key)
         return await create_installation_token(app_jwt, repo.installation_id)
     async with session_factory() as session:
-        token_row = (await session.execute(select(GithubOAuthToken).order_by(GithubOAuthToken.id.desc()))).scalars().first()
+        if run.user_id is not None:
+            token_row = (
+                await session.execute(
+                    select(GithubOAuthToken).where(GithubOAuthToken.user_id == run.user_id)
+                )
+            ).scalar_one_or_none()
+        else:
+            logger.warning(
+                "analysis run missing user_id; falling back to latest oauth token",
+                extra={"run_id": run.id, "repo_id": repo.id},
+            )
+            token_row = (
+                await session.execute(
+                    select(GithubOAuthToken).order_by(GithubOAuthToken.id.desc())
+                )
+            ).scalars().first()
     if token_row is None:
         raise RuntimeError("oauth_token_missing")
     return token_row.access_token
@@ -171,6 +280,11 @@ async def _fetch_repo_zip(repo: Repo, run: AnalysisRun, token: str) -> Path:
     }
     async with httpx.AsyncClient(timeout=90, follow_redirects=True) as client:
         resp = await client.get(url, headers=headers)
+        if resp.status_code == 401:
+            raise RuntimeError(
+                f"github_token_unauthorized: re-authenticate via /api/v1/auth/github/start "
+                f"(repo={repo.owner}/{repo.name}, run_id={run.id})"
+            )
         resp.raise_for_status()
         content = resp.content
     logger.info("github zip fetched", extra={"run_id": run.id, "repo_id": repo.id, "stage": "acquire"})

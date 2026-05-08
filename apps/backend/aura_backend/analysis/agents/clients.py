@@ -31,12 +31,42 @@ class OpenAIChatClient:
 
     async def complete(self, messages: list[dict[str, Any]], *, max_tokens: int | None = None, temperature: float = 0.2) -> str:
         import asyncio
+        import os
+
+        # Demo replay mode — never hit the network. Returns a deterministic
+        # placeholder so the rest of the pipeline (verifier, persist) still
+        # exercises end-to-end. Use AURA_DEMO_MODE=replay during stage demos
+        # if the LLM endpoint is flaky.
+        if os.getenv("AURA_DEMO_MODE", "").lower() == "replay":
+            logger.info("llm replay mode", extra={"event": "llm_replay"})
+            return _replay_response(messages)
+
+        # Estimate token usage and clamp max_tokens so input + output fits the
+        # model's context window. vLLM returns 400 if (prompt_tokens +
+        # max_tokens) > max_model_len.
+        approx_input_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        approx_input_tokens = approx_input_chars // 4  # rough heuristic
+        ctx_window = int(os.getenv("LLM_MAX_CONTEXT", "32768"))
+        head_room = max(256, ctx_window - approx_input_tokens - 256)
+        chosen_max = max_tokens or self.max_tokens
+        if chosen_max > head_room:
+            logger.warning(
+                "clamping max_tokens to fit context window",
+                extra={
+                    "event": "llm_clamp",
+                    "input_tokens_est": approx_input_tokens,
+                    "ctx_window": ctx_window,
+                    "from": chosen_max,
+                    "to": head_room,
+                },
+            )
+            chosen_max = head_room
 
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens or self.max_tokens,
+            "max_tokens": chosen_max,
         }
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -58,9 +88,26 @@ class OpenAIChatClient:
                             await asyncio.sleep(backoff * attempt)
                             continue
                     if resp.status_code >= 400:
+                        body = resp.text
+                        # 400 from vLLM most often = unknown model OR
+                        # context overflow. Surface body in the exception
+                        # itself so callers see why instead of just '400'.
                         logger.error(
                             "llm request failed",
-                            extra={"event": "llm_error", "status": resp.status_code, "body": resp.text[:2000]},
+                            extra={
+                                "event": "llm_error",
+                                "status": resp.status_code,
+                                "model": self.model,
+                                "url": f"{self.base_url}/chat/completions",
+                                "input_tokens_est": approx_input_tokens,
+                                "max_tokens": chosen_max,
+                                "body": body[:2000],
+                            },
+                        )
+                        raise RuntimeError(
+                            f"llm_{resp.status_code}: model={self.model!r} "
+                            f"input_tokens~{approx_input_tokens} max_tokens={chosen_max} "
+                            f"body={body[:500]}"
                         )
                     resp.raise_for_status()
                     data = resp.json()
@@ -99,6 +146,27 @@ class OpenAIVisionClient(OpenAIChatClient):
 class DisabledVisionClient:
     async def describe_image(self, image_path: Path, prompt: str) -> str:
         raise RuntimeError("vlm_disabled")
+
+
+def _replay_response(messages: list[dict[str, Any]]) -> str:
+    """Deterministic placeholder for demo replay mode.
+
+    If the system prompt asks for JSON (verifier path), return a minimal
+    pass-OK JSON. Otherwise return Markdown with a single plausible
+    verified citation so the pipeline persists doc rows successfully.
+    """
+    system = next((m["content"] for m in messages if m.get("role") == "system"), "")
+    if "JSON" in system or "json" in system:
+        return (
+            '{"passed": true, "citation_coverage": 0.9, '
+            '"unsupported_claims": 0, "section_completeness": 1.0, "issues": []}'
+        )
+    return (
+        "## Overview\n\n"
+        "_Replay mode — generated locally without LLM call._\n\n"
+        "This artifact is documented from extracted facts only "
+        "[verified: replay/replay.py:L1-L1].\n"
+    )
 
 
 def _mime_for_path(path: Path) -> str:

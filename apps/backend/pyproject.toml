@@ -3,7 +3,7 @@ name = "aura-backend"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-  "fastapi>=0.115",
+  "fastapi>=0.118",
   "uvicorn[standard]>=0.30",
   "sqlalchemy>=2.0",
   "aiosqlite>=0.20",
@@ -11,10 +11,20 @@ dependencies = [
   "pydantic>=2.8",
   "httpx>=0.27",
   "PyJWT>=2.9",
+  "bcrypt>=4.1",
+  "email-validator>=2.1",
   "python-multipart>=0.0.9",
   "python-dotenv>=1.0",
   "PyYAML>=6.0",
   "networkx>=3.3",
+  "tree-sitter>=0.25",
+  "tree-sitter-language-pack==1.6.2",
+  "pathspec>=0.12",
+  "gitpython>=3.1",
+  "tenacity>=9.0",
+  "numpy>=1.26",
+  "structlog>=24.0",
+  "mcp[cli]>=1.0",
 ]
 
 [project.optional-dependencies]

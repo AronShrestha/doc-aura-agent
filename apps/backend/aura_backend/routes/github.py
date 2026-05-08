@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..models import GithubInstallation, GithubOAuthToken
-from ..routes.auth import current_user
+from ..deps import current_user
 from ..services.github import make_state
 from ..services.github_app import (
     GithubAppError,

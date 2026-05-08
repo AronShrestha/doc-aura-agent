@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime
-from sqlalchemy import String, Integer, DateTime, ForeignKey, Text, JSON
+from sqlalchemy import String, Integer, DateTime, ForeignKey, LargeBinary, Text, JSON, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -11,8 +11,11 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    github_user_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    login: Mapped[str] = mapped_column(String(255))
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    github_user_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
+    login: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -44,7 +47,9 @@ class GithubInstallation(Base):
 
 class Repo(Base):
     __tablename__ = "repos"
+    __table_args__ = (UniqueConstraint("user_id", "github_repo_id", name="uq_repo_user_github"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     github_repo_id: Mapped[str] = mapped_column(String(64), index=True)
     full_name: Mapped[str] = mapped_column(String(255))
     default_branch: Mapped[str] = mapped_column(String(128), default="main")
@@ -57,6 +62,7 @@ class AnalysisRun(Base):
     __tablename__ = "analysis_runs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="queued")
     stage: Mapped[str] = mapped_column(String(64), default="queued")
     progress: Mapped[int] = mapped_column(Integer, default=0)
@@ -64,6 +70,7 @@ class AnalysisRun(Base):
     commit_sha: Mapped[str] = mapped_column(String(128), default="")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     quality_report: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    activity: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -115,6 +122,9 @@ class GeneratedDoc(Base):
     source_files: Mapped[list] = mapped_column(JSON)
     source_lines: Mapped[dict] = mapped_column(JSON)
     content_md: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    embedding_dim: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -153,6 +163,10 @@ class PrAnalysisRun(Base):
     head_run_id: Mapped[int | None] = mapped_column(ForeignKey("analysis_runs.id"), nullable=True)
     impact_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     review_comment_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shadow_pr_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    shadow_pr_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    shadow_pr_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    shadow_pr_file_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -173,6 +187,8 @@ class DocDiff(Base):
     artifact_id: Mapped[str] = mapped_column(String(128), index=True)
     doc_path: Mapped[str] = mapped_column(String(500))
     change_type: Mapped[str] = mapped_column(String(64))
+    impact_tier: Mapped[str] = mapped_column(String(16), default="Medium", index=True)
+    affected_symbol_ids: Mapped[list] = mapped_column(JSON, default=list)
     unified_diff: Mapped[str] = mapped_column(Text)
     side_by_side: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

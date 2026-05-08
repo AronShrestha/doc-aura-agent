@@ -46,7 +46,12 @@ class Settings(BaseModel):
     vlm_max_tokens: int = int(os.getenv("VLM_MAX_TOKENS", "2048"))
     agent_max_artifacts: int = int(os.getenv("AGENT_MAX_ARTIFACTS", "120"))
     verifier_enabled: bool = os.getenv("VERIFIER_ENABLED", "false").lower() in ("1", "true", "yes")
+    llm_max_concurrency: int = int(os.getenv("LLM_MAX_CONCURRENCY", "10"))
+    narrator_enabled: bool = os.getenv("NARRATOR_ENABLED", "true").lower() in ("1", "true", "yes")
     github_webhook_secret: str = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+    jwt_secret: str = os.getenv("JWT_SECRET", "dev-insecure-change-me")
+    jwt_algorithm: str = os.getenv("JWT_ALGORITHM", "HS256")
+    jwt_expires_minutes: int = int(os.getenv("JWT_EXPIRES_MINUTES", str(60 * 24 * 7)))
 
 
 settings = Settings()

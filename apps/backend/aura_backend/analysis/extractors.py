@@ -16,6 +16,11 @@ except Exception:  # pragma: no cover
 
 from .types import ExtractedArtifact, ExtractedEdge, RepoSnapshot, SourceFile
 from .graph import add_service_flow_artifacts
+from .ingestion_bridge import (
+    apply_semantic_hashes,
+    extract_js_ts_artifacts,
+    parse_all as _parse_all_with_treesitter,
+)
 from .utils import literal_string, node_to_source, slugify, stable_artifact_id
 
 
@@ -56,6 +61,14 @@ def extract_repo(snapshot: RepoSnapshot) -> tuple[list[ExtractedArtifact], list[
 
     edges.extend(_import_edges(snapshot, artifacts, module_by_path))
     edges.extend(_resolved_call_edges(artifacts, function_by_simple_name))
+
+    # Tree-sitter pass: one parse, two consumers.
+    parsed_symbols = _parse_all_with_treesitter(snapshot)
+    apply_semantic_hashes(artifacts, snapshot, parsed=parsed_symbols)
+    ts_artifacts, ts_edges = extract_js_ts_artifacts(snapshot, parsed=parsed_symbols)
+    artifacts.extend(ts_artifacts)
+    edges.extend(ts_edges)
+
     artifacts, edges = add_service_flow_artifacts(snapshot, _dedupe_artifacts(artifacts), _dedupe_edges(edges))
     edges = _dedupe_edges(edges)
     summary = _summary(snapshot, artifacts, edges)

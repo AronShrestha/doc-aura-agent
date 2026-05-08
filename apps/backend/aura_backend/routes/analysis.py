@@ -5,9 +5,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
-from ..models import GithubInstallation, GithubOAuthToken, Repo, AnalysisRun, DocSection, Artifact, ArtifactEdge, GeneratedDoc, PullRequest, PrAnalysisRun, DocDiff
+from ..deps import current_user
+from ..models import GithubInstallation, GithubOAuthToken, Repo, AnalysisRun, DocSection, Artifact, ArtifactEdge, GeneratedDoc, PullRequest, PrAnalysisRun, DocDiff, User
 from ..schemas import AnalyzeRepoRequest, AnalyzeRepoResponse, RunResponse, SearchRequest, DocSectionResponse, GeneratedDocResponse
-from ..routes.auth import current_user
 from ..services.github_app import (
     GithubAppError,
     build_app_jwt,
@@ -62,12 +62,13 @@ async def analyze_repo(req: AnalyzeRepoRequest, user=Depends(current_user), sess
 
     repo = (await session.execute(
         select(Repo).where(
+            Repo.user_id == user.id,
             Repo.github_repo_id == req.github_repo_id,
-            Repo.installation_id == (installation_id or "oauth"),
         )
     )).scalar_one_or_none()
     if not repo:
         repo = Repo(
+            user_id=user.id,
             github_repo_id=req.github_repo_id,
             full_name=repo_data["full_name"],
             default_branch=repo_data["default_branch"],
@@ -80,6 +81,7 @@ async def analyze_repo(req: AnalyzeRepoRequest, user=Depends(current_user), sess
 
     run = AnalysisRun(
         repo_id=repo.id,
+        user_id=user.id,
         status="queued",
         stage="queued",
         progress=0,
@@ -102,28 +104,37 @@ async def analyze_repo(req: AnalyzeRepoRequest, user=Depends(current_user), sess
 @router.get("/runs/{run_id}", response_model=RunResponse)
 async def run_status(run_id: int, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
     logger.debug("run status requested", extra={"run_id": run_id, "event": "run_status"})
-    run = (await session.execute(select(AnalysisRun).where(AnalysisRun.id == run_id))).scalar_one_or_none()
+    run = (await session.execute(
+        select(AnalysisRun).where(AnalysisRun.id == run_id, AnalysisRun.user_id == user.id)
+    )).scalar_one_or_none()
     if not run:
         raise HTTPException(status_code=404, detail="run_not_found")
+    repo = (await session.execute(select(Repo).where(Repo.id == run.repo_id))).scalar_one_or_none()
+    activity_tail = (run.activity or [])[-60:] if run.activity else []
     return RunResponse(
         run_id=run.id,
         repo_id=run.repo_id,
+        repo_full_name=repo.full_name if repo else None,
         status=run.status,
         stage=run.stage,
         progress=run.progress,
         error=run.error,
         quality_report=run.quality_report,
+        activity=activity_tail,
     )
 
 
 @router.get("/repos/{repo_id}/docs/index")
 async def docs_index(repo_id: int, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
     logger.debug("docs index requested", extra={"repo_id": repo_id, "event": "docs_index"})
-    run = await _latest_run(session, repo_id)
+    run = await _latest_run(session, repo_id, user)
     docs = (await session.execute(select(GeneratedDoc).where(GeneratedDoc.run_id == run.id).order_by(GeneratedDoc.slug_path))).scalars().all()
+    manifest = (run.quality_report or {}).get("manifest") or {}
     return {
         "repo_id": repo_id,
         "run_id": run.id,
+        "codebase_profile": manifest.get("codebase_profile") or {},
+        "manifest_tree": manifest.get("tree") or [],
         "sections": [
             {
                 "section_id": d.artifact_id,
@@ -139,7 +150,7 @@ async def docs_index(repo_id: int, user=Depends(current_user), session: AsyncSes
 @router.get("/repos/{repo_id}/docs/{section_id}", response_model=DocSectionResponse)
 async def docs_get(repo_id: int, section_id: str, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
     logger.debug("doc requested", extra={"repo_id": repo_id, "event": "docs_get"})
-    run = await _latest_run(session, repo_id)
+    run = await _latest_run(session, repo_id, user)
     doc = (await session.execute(select(GeneratedDoc).where(GeneratedDoc.run_id == run.id, GeneratedDoc.artifact_id == section_id))).scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="section_not_found")
@@ -158,7 +169,7 @@ async def docs_get(repo_id: int, section_id: str, user=Depends(current_user), se
 @router.post("/repos/{repo_id}/search")
 async def docs_search(repo_id: int, req: SearchRequest, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
     logger.debug("docs search requested", extra={"repo_id": repo_id, "event": "docs_search"})
-    run = await _latest_run(session, repo_id)
+    run = await _latest_run(session, repo_id, user)
     q = req.query.lower()
 
     artifacts = (await session.execute(select(Artifact).where(Artifact.run_id == run.id))).scalars().all()
@@ -190,7 +201,7 @@ async def docs_search(repo_id: int, req: SearchRequest, user=Depends(current_use
 @router.get("/repos/{repo_id}/artifacts/{artifact_id}")
 async def artifact_get(repo_id: int, artifact_id: str, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
     logger.debug("artifact requested", extra={"repo_id": repo_id, "event": "artifact_get"})
-    run = await _latest_run(session, repo_id)
+    run = await _latest_run(session, repo_id, user)
     artifact = (await session.execute(select(Artifact).where(Artifact.run_id == run.id, Artifact.artifact_id == artifact_id))).scalar_one_or_none()
     if not artifact:
         raise HTTPException(status_code=404, detail="artifact_not_found")
@@ -200,7 +211,7 @@ async def artifact_get(repo_id: int, artifact_id: str, user=Depends(current_user
 @router.get("/repos/{repo_id}/dependencies/{artifact_id}")
 async def dependencies_get(repo_id: int, artifact_id: str, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
     logger.debug("dependencies requested", extra={"repo_id": repo_id, "event": "dependencies_get"})
-    run = await _latest_run(session, repo_id)
+    run = await _latest_run(session, repo_id, user)
     edges = (await session.execute(select(ArtifactEdge).where(ArtifactEdge.run_id == run.id, ArtifactEdge.src_artifact_id == artifact_id))).scalars().all()
     return {
         "artifact_id": artifact_id,
@@ -211,7 +222,7 @@ async def dependencies_get(repo_id: int, artifact_id: str, user=Depends(current_
 @router.get("/repos/{repo_id}/runs/latest", response_model=RunResponse)
 async def latest_run(repo_id: int, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
     logger.debug("latest run requested", extra={"repo_id": repo_id, "event": "latest_run"})
-    run = await _latest_run(session, repo_id)
+    run = await _latest_run(session, repo_id, user)
     return RunResponse(
         run_id=run.id,
         repo_id=run.repo_id,
@@ -226,7 +237,7 @@ async def latest_run(repo_id: int, user=Depends(current_user), session: AsyncSes
 @router.get("/repos/{repo_id}/artifacts")
 async def artifacts_by_category(repo_id: int, category: str | None = None, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
     logger.debug("artifacts requested", extra={"repo_id": repo_id, "event": "artifacts_by_category"})
-    run = await _latest_run(session, repo_id)
+    run = await _latest_run(session, repo_id, user)
     stmt = select(Artifact).where(Artifact.run_id == run.id)
     if category:
         stmt = stmt.where(Artifact.category == category)
@@ -250,23 +261,90 @@ async def artifacts_by_category(repo_id: int, category: str | None = None, user=
 
 
 @router.get("/repos/{repo_id}/graph")
-async def graph_get(repo_id: int, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
-    logger.debug("graph requested", extra={"repo_id": repo_id, "event": "graph_get"})
-    run = await _latest_run(session, repo_id)
-    artifacts = (await session.execute(select(Artifact).where(Artifact.run_id == run.id))).scalars().all()
-    edges = (await session.execute(select(ArtifactEdge).where(ArtifactEdge.run_id == run.id))).scalars().all()
+async def graph_get(
+    repo_id: int,
+    pr_run_id: int | None = None,
+    user=Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Return a graph payload shaped for react-flow.
+
+    If ``pr_run_id`` is provided, each node's tier (``Direct|High|Medium``)
+    from the PR analysis run is attached, and edges that exist in base
+    but not head are flagged ``broken: true`` for the dashed-red render.
+    """
+    logger.debug("graph requested", extra={"repo_id": repo_id, "pr_run_id": pr_run_id, "event": "graph_get"})
+    run = await _latest_run(session, repo_id, user)
+    head_run_id = run.id
+
+    pr_run = None
+    if pr_run_id is not None:
+        pr_run = (
+            await session.execute(select(PrAnalysisRun).where(PrAnalysisRun.id == pr_run_id))
+        ).scalars().first()
+        if pr_run and pr_run.head_run_id:
+            head_run_id = pr_run.head_run_id
+
+    artifacts = (await session.execute(select(Artifact).where(Artifact.run_id == head_run_id))).scalars().all()
+    edges = (await session.execute(select(ArtifactEdge).where(ArtifactEdge.run_id == head_run_id))).scalars().all()
+
+    tiers: dict[str, str] = {}
+    broken_edges: set[tuple[str, str, str]] = set()
+    if pr_run and pr_run.impact_summary:
+        tiers = pr_run.impact_summary.get("tiers", {}) or {}
+        # base-only edges = removed deps → render as dashed-red
+        if pr_run.base_run_id:
+            base_edges = (
+                await session.execute(
+                    select(ArtifactEdge).where(ArtifactEdge.run_id == pr_run.base_run_id)
+                )
+            ).scalars().all()
+            head_edge_keys = {(e.src_artifact_id, e.dst_artifact_id, e.kind) for e in edges}
+            for be in base_edges:
+                key = (be.src_artifact_id, be.dst_artifact_id, be.kind)
+                if key not in head_edge_keys:
+                    broken_edges.add(key)
+
+    nodes = []
+    for a in artifacts:
+        nodes.append(
+            {
+                "id": a.artifact_id,
+                "category": a.category,
+                "name": a.name,
+                "source_file": a.source_file,
+                "line": a.source_line_start,
+                "tier": tiers.get(a.artifact_id),
+                "language": (a.payload or {}).get("language"),
+            }
+        )
+
+    edge_payload = [
+        {
+            "source": e.src_artifact_id,
+            "target": e.dst_artifact_id,
+            "kind": e.kind,
+            "broken": False,
+        }
+        for e in edges
+    ]
+    for src, dst, kind in broken_edges:
+        edge_payload.append({"source": src, "target": dst, "kind": kind, "broken": True})
+
     return {
         "repo_id": repo_id,
-        "run_id": run.id,
-        "nodes": [{"id": a.artifact_id, "category": a.category, "name": a.name} for a in artifacts],
-        "edges": [{"source": e.src_artifact_id, "target": e.dst_artifact_id, "kind": e.kind} for e in edges],
+        "run_id": head_run_id,
+        "pr_run_id": pr_run.id if pr_run else None,
+        "tier_counts": (pr_run.impact_summary or {}).get("tier_counts") if pr_run else None,
+        "nodes": nodes,
+        "edges": edge_payload,
     }
 
 
 @router.get("/repos/{repo_id}/generated-docs/{artifact_id}", response_model=GeneratedDocResponse)
 async def generated_doc_get(repo_id: int, artifact_id: str, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
     logger.debug("generated doc requested", extra={"repo_id": repo_id, "event": "generated_doc_get"})
-    run = await _latest_run(session, repo_id)
+    run = await _latest_run(session, repo_id, user)
     doc = (await session.execute(select(GeneratedDoc).where(GeneratedDoc.run_id == run.id, GeneratedDoc.artifact_id == artifact_id))).scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="doc_not_found")
@@ -285,6 +363,7 @@ async def generated_doc_get(repo_id: int, artifact_id: str, user=Depends(current
 @router.get("/repos/{repo_id}/pull-requests")
 async def pr_list(repo_id: int, user=Depends(current_user), session: AsyncSession = Depends(get_session)):
     logger.debug("pr list requested", extra={"repo_id": repo_id, "event": "pr_list"})
+    await _user_repo(session, repo_id, user)
     prs = (await session.execute(select(PullRequest).where(PullRequest.repo_id == repo_id).order_by(PullRequest.number.desc()))).scalars().all()
     return {
         "pull_requests": [
@@ -309,7 +388,23 @@ async def pr_impact(pull_request_id: int, user=Depends(current_user), session: A
     run = (await session.execute(select(PrAnalysisRun).where(PrAnalysisRun.pull_request_id == pull_request_id).order_by(PrAnalysisRun.id.desc()))).scalars().first()
     if not run:
         raise HTTPException(status_code=404, detail="pr_analysis_not_found")
-    return {"pr_analysis_run_id": run.id, "status": run.status, "impact_summary": run.impact_summary, "review_comment_body": run.review_comment_body, "error": run.error}
+    return {
+        "pr_analysis_run_id": run.id,
+        "status": run.status,
+        "impact_summary": run.impact_summary,
+        "review_comment_body": run.review_comment_body,
+        "shadow_pr": (
+            {
+                "url": run.shadow_pr_url,
+                "branch": run.shadow_pr_branch,
+                "path": run.shadow_pr_path,
+                "file_count": run.shadow_pr_file_count,
+            }
+            if run.shadow_pr_url
+            else None
+        ),
+        "error": run.error,
+    }
 
 
 @router.get("/pull-requests/{pull_request_id}/doc-diff")
@@ -319,22 +414,39 @@ async def pr_doc_diff(pull_request_id: int, user=Depends(current_user), session:
     if not run:
         raise HTTPException(status_code=404, detail="pr_analysis_not_found")
     diffs = (await session.execute(select(DocDiff).where(DocDiff.pr_analysis_run_id == run.id))).scalars().all()
+    tier_order = {"Direct": 0, "High": 1, "Medium": 2}
+    diffs_sorted = sorted(diffs, key=lambda d: (tier_order.get(d.impact_tier, 9), d.doc_path))
     return {
         "pr_analysis_run_id": run.id,
+        "tier_counts": (run.impact_summary or {}).get("tier_counts") if run.impact_summary else None,
         "diffs": [
             {
                 "artifact_id": d.artifact_id,
                 "doc_path": d.doc_path,
                 "change_type": d.change_type,
+                "impact_tier": d.impact_tier,
+                "affected_symbol_ids": d.affected_symbol_ids,
                 "unified_diff": d.unified_diff,
                 "side_by_side": d.side_by_side,
             }
-            for d in diffs
+            for d in diffs_sorted
         ],
     }
 
 
-async def _latest_run(session: AsyncSession, repo_id: int) -> AnalysisRun:
+async def _user_repo(session: AsyncSession, repo_id: int, user: User) -> Repo:
+    repo = (
+        await session.execute(
+            select(Repo).where(Repo.id == repo_id, Repo.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+    if not repo:
+        raise HTTPException(status_code=404, detail="repo_not_found")
+    return repo
+
+
+async def _latest_run(session: AsyncSession, repo_id: int, user: User) -> AnalysisRun:
+    await _user_repo(session, repo_id, user)
     run = (await session.execute(select(AnalysisRun).where(AnalysisRun.repo_id == repo_id).order_by(AnalysisRun.id.desc()))).scalars().first()
     if not run:
         raise HTTPException(status_code=404, detail="repo_or_docs_not_found")
