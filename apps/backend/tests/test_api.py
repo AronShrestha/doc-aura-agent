@@ -28,6 +28,18 @@ async def test_health():
 
 
 @pytest.mark.asyncio
+async def test_random_dummy_endpoint():
+    await _init_db()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/api/v1/dummy/random")
+        assert r.status_code == 200
+        payload = r.json()
+        assert payload["status"] == "ok"
+        assert isinstance(payload["message"], str)
+        assert 1000 <= payload["lucky_number"] <= 9999
+
+
+@pytest.mark.asyncio
 async def test_auth_and_analysis_flow():
     await _init_db()
     original_client_id = auth_routes.settings.github_client_id

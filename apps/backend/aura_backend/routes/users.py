@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import random
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +10,7 @@ from ..deps import current_user
 from ..models import AnalysisRun, Repo, User
 from ..schemas import (
     AuthResponse,
+    DummyResponse,
     LoginRequest,
     MeResponse,
     MyReposResponse,
@@ -21,6 +23,21 @@ from ..services.auth import create_access_token, hash_password, verify_password
 
 router = APIRouter(prefix="/api/v1", tags=["users"])
 logger = logging.getLogger(__name__)
+
+
+_DUMMY_MESSAGES = [
+    "Aura agents are warming up.",
+    "Dummy endpoint says hello from the docs layer.",
+    "Nothing to see here except a lucky number.",
+]
+
+
+@router.get("/dummy/random", response_model=DummyResponse)
+async def random_dummy():
+    return DummyResponse(
+        message=random.choice(_DUMMY_MESSAGES),
+        lucky_number=random.randint(1000, 9999),
+    )
 
 
 @router.post("/auth/signup", response_model=AuthResponse)
@@ -41,6 +58,7 @@ async def signup(req: SignupRequest, session: AsyncSession = Depends(get_session
 
     token = create_access_token(user.id)
     logger.info("user signup", extra={"user_id": user.id, "event": "user_signup"})
+ 
     return AuthResponse(
         access_token=token,
         user=UserPublic(id=user.id, email=user.email, display_name=user.display_name),

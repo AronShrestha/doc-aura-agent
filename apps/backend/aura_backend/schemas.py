@@ -17,6 +17,7 @@ class UserPublic(BaseModel):
     id: int
     email: EmailStr
     display_name: str | None = None
+    nickname: str | None = Field(default=None, max_length=255)
 
 
 class AuthResponse(BaseModel):
@@ -31,6 +32,12 @@ class MeResponse(BaseModel):
     display_name: str | None = None
     github_linked: bool
     github_login: str | None = None
+
+
+class DummyResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    message: str
+    lucky_number: int
 
 
 class RepoSummary(BaseModel):
