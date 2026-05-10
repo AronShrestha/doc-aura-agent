@@ -55,11 +55,12 @@ export function AuthProvider({ children }) {
   );
 
   const signup = useCallback(
-    async (email, password, displayName) => {
+    async (email, password, displayName, phone) => {
       const { data } = await client.post("/auth/signup", {
         email,
         password,
         display_name: displayName || null,
+        phone: phone || null,
       });
       setToken(data.access_token);
       const me = await refresh();

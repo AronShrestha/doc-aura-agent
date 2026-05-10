@@ -6,6 +6,7 @@ class SignupRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=256)
     display_name: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=32)
 
 
 class LoginRequest(BaseModel):
@@ -17,6 +18,7 @@ class UserPublic(BaseModel):
     id: int
     email: EmailStr
     display_name: str | None = None
+    phone: str | None = None
 
 
 class AuthResponse(BaseModel):
@@ -29,6 +31,7 @@ class MeResponse(BaseModel):
     id: int
     email: EmailStr
     display_name: str | None = None
+    phone: str | None = None
     github_linked: bool
     github_login: str | None = None
 

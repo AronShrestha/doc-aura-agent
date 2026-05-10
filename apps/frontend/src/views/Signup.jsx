@@ -11,6 +11,7 @@ export function Signup() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [phone, setPhone] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -23,7 +24,7 @@ export function Signup() {
     }
     setSubmitting(true);
     try {
-      await signup(email, password, displayName);
+      await signup(email, password, displayName, phone);
       navigate("/", { replace: true });
     } catch (err) {
       const detail = err?.response?.data?.detail;
@@ -73,6 +74,21 @@ export function Signup() {
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
+          />
+        </div>
+
+        <div className="auth-field">
+          <span className="auth-field-label">
+            Phone
+            <span className="auth-field-hint">Optional</span>
+          </span>
+          <input
+            type="tel"
+            autoComplete="tel"
+            placeholder="+1 555 123 4567"
+            maxLength={32}
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
           />
         </div>
 
