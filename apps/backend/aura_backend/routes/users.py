@@ -34,6 +34,7 @@ async def signup(req: SignupRequest, session: AsyncSession = Depends(get_session
         email=email,
         password_hash=hash_password(req.password),
         display_name=req.display_name,
+        phone=req.phone,
     )
     session.add(user)
     await session.commit()
@@ -43,7 +44,7 @@ async def signup(req: SignupRequest, session: AsyncSession = Depends(get_session
     logger.info("user signup", extra={"user_id": user.id, "event": "user_signup"})
     return AuthResponse(
         access_token=token,
-        user=UserPublic(id=user.id, email=user.email, display_name=user.display_name),
+        user=UserPublic(id=user.id, email=user.email, display_name=user.display_name, phone=user.phone),
     )
 
 
@@ -58,7 +59,7 @@ async def login(req: LoginRequest, session: AsyncSession = Depends(get_session))
     logger.info("user login", extra={"user_id": user.id, "event": "user_login"})
     return AuthResponse(
         access_token=token,
-        user=UserPublic(id=user.id, email=user.email, display_name=user.display_name),
+        user=UserPublic(id=user.id, email=user.email, display_name=user.display_name, phone=user.phone),
     )
 
 
@@ -68,6 +69,7 @@ async def me(user: User = Depends(current_user)):
         id=user.id,
         email=user.email,
         display_name=user.display_name,
+        phone=user.phone,
         github_linked=bool(user.github_user_id),
         github_login=user.login,
     )

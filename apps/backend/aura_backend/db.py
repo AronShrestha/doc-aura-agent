@@ -35,6 +35,8 @@ async def ensure_columns(conn) -> None:
             await conn.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) DEFAULT ''"))
         if "display_name" not in user_cols:
             await conn.execute(text("ALTER TABLE users ADD COLUMN display_name VARCHAR(255)"))
+        if "phone" not in user_cols:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN phone VARCHAR(32)"))
 
     repo_cols = await _existing("repos")
     if repo_cols and "user_id" not in repo_cols:
