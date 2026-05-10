@@ -10,6 +10,7 @@ from sqlalchemy import select
 from ..config import settings
 from ..db import SessionLocal
 from ..models import PullRequest, Repo
+from ..services.post_merge import enqueue_canonical_analysis
 from ..services.pr_orchestrator import run_pr_orchestrator
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
@@ -43,9 +44,21 @@ async def github_webhook(
 
     if action == "closed" and pr_payload.get("merged"):
         pr_id = await _upsert_pr(payload)
-        promoted = await _promote_on_merge(pr_id)
-        logger.info("pull request merged; head run promoted", extra={"pr_id": pr_id, "promoted_run_id": promoted})
-        return {"status": "merged", "pull_request_id": pr_id, "promoted_run_id": promoted}
+        merge_commit_sha = pr_payload.get("merge_commit_sha") or pr_payload.get("head", {}).get("sha", "")
+        result = await _promote_on_merge(pr_id, merge_commit_sha=merge_commit_sha)
+        logger.info(
+            "pull request merged; canonical refresh dispatched",
+            extra={"pr_id": pr_id, "event": "pr_merged", **result},
+        )
+        return {"status": "merged", "pull_request_id": pr_id, **result}
+
+    if action == "closed" and not pr_payload.get("merged"):
+        pr_id = await _upsert_pr(payload)
+        logger.info(
+            "pull request closed without merge; no doc refresh",
+            extra={"event": "github_webhook_closed_unmerged", "pr_id": pr_id},
+        )
+        return {"status": "closed_unmerged", "pull_request_id": pr_id}
 
     if action not in {"opened", "synchronize", "reopened"}:
         logger.info("pull request webhook action ignored", extra={"event": "github_webhook_ignored", "action": action})
@@ -57,18 +70,64 @@ async def github_webhook(
     return {"status": "accepted", "pull_request_id": pr_id}
 
 
-async def _promote_on_merge(pull_request_id: int) -> int | None:
-    """On PR merge into default branch: take the LLM-updated docs cached in
-    DocDiff rows and write them into the canonical (non-PR) AnalysisRun's
-    GeneratedDoc table. Original docs were untouched until now; this is the
-    moment they update."""
+async def _promote_on_merge(
+    pull_request_id: int,
+    *,
+    merge_commit_sha: str = "",
+) -> dict:
+    """On PR merge into the default branch:
+
+    1. **Layer A (instant preview)** — copy LLM-edited doc snippets cached in
+       ``DocDiff`` rows into the canonical ``GeneratedDoc.content_md`` so the
+       UI reflects the merge immediately. Refresh embeddings on every patched
+       doc so the docs-chat retriever doesn't keep returning stale text. New
+       docs introduced by the PR (no canonical row yet) get inserted instead
+       of silently dropped.
+    2. **Layer B (source of truth)** — enqueue a fresh canonical
+       ``AnalysisRun`` on the merge commit. That re-extracts artifacts,
+       regenerates docs, recomputes graph edges, and re-embeds everything —
+       reconciling new files / removed code / new artifacts that the snippet
+       patch can't see.
+
+    Returns a small dict surfaced through the webhook response so the result
+    is observable in CI / GitHub redelivery logs:
+
+        {
+            "promoted_run_id": <canonical run id or None>,
+            "applied": <docs whose content_md was patched>,
+            "created_docs": <docs newly inserted into canonical>,
+            "embedded": <docs whose embedding was refreshed>,
+            "fresh_run_id": <newly enqueued canonical run id or None>,
+            "skip_reason": <"no_pr" | "no_pr_run" | "no_canonical" | None>,
+        }
+    """
     import hashlib
+
+    from ..analysis.agents.embedding import QwenEmbedder, pack_vector
     from ..models import AnalysisRun, DocDiff, GeneratedDoc, PrAnalysisRun, PullRequest
 
+    result: dict = {
+        "promoted_run_id": None,
+        "applied": 0,
+        "created_docs": 0,
+        "embedded": 0,
+        "fresh_run_id": None,
+        "skip_reason": None,
+    }
+    repo_id_for_enqueue: int | None = None
+
     async with SessionLocal() as session:
-        pr = (await session.execute(select(PullRequest).where(PullRequest.id == pull_request_id))).scalar_one_or_none()
+        pr = (
+            await session.execute(select(PullRequest).where(PullRequest.id == pull_request_id))
+        ).scalar_one_or_none()
         if not pr:
-            return None
+            logger.warning(
+                "merge: pull request row missing; skipping",
+                extra={"event": "merge_skip", "pr_id": pull_request_id, "reason": "no_pr"},
+            )
+            result["skip_reason"] = "no_pr"
+            return result
+        repo_id_for_enqueue = pr.repo_id
         pr_run = (
             await session.execute(
                 select(PrAnalysisRun)
@@ -77,47 +136,140 @@ async def _promote_on_merge(pull_request_id: int) -> int | None:
             )
         ).scalars().first()
         if not pr_run:
-            return None
-        repo = (await session.execute(select(Repo).where(Repo.id == pr.repo_id))).scalar_one()
-        canonical = (
-            await session.execute(
-                select(AnalysisRun)
-                .where(
-                    AnalysisRun.repo_id == pr.repo_id,
-                    AnalysisRun.is_pr_run.is_(False),
-                    AnalysisRun.status == "succeeded",
-                    AnalysisRun.branch == repo.default_branch,
-                )
-                .order_by(AnalysisRun.id.desc())
+            logger.info(
+                "merge: no PrAnalysisRun for PR; nothing to promote",
+                extra={"event": "merge_skip", "pr_id": pull_request_id, "reason": "no_pr_run"},
             )
-        ).scalars().first()
-        if not canonical:
-            logger.warning("merge: no canonical run; skipping doc promotion", extra={"pr_id": pull_request_id})
-            return None
-        diffs = (
-            await session.execute(select(DocDiff).where(DocDiff.pr_analysis_run_id == pr_run.id))
-        ).scalars().all()
-        canonical_docs = (
-            await session.execute(select(GeneratedDoc).where(GeneratedDoc.run_id == canonical.id))
-        ).scalars().all()
-        canonical_by_aid = {d.artifact_id: d for d in canonical_docs}
-        applied = 0
-        for diff in diffs:
-            doc = canonical_by_aid.get(diff.artifact_id)
-            if not doc:
-                continue
-            after_text = _extract_head_text(diff.side_by_side)
-            if not after_text:
-                continue
-            if after_text == (doc.content_md or ""):
-                continue
-            doc.content_md = after_text
-            doc.content_hash = hashlib.sha256(after_text.encode("utf-8")).hexdigest()
-            applied += 1
-        if applied:
-            await session.commit()
-        logger.info("merge: docs promoted", extra={"pr_id": pull_request_id, "applied": applied, "canonical_run_id": canonical.id})
-        return canonical.id
+            result["skip_reason"] = "no_pr_run"
+        else:
+            repo = (await session.execute(select(Repo).where(Repo.id == pr.repo_id))).scalar_one()
+            canonical = (
+                await session.execute(
+                    select(AnalysisRun)
+                    .where(
+                        AnalysisRun.repo_id == pr.repo_id,
+                        AnalysisRun.is_pr_run.is_(False),
+                        AnalysisRun.status == "succeeded",
+                        AnalysisRun.branch == repo.default_branch,
+                    )
+                    .order_by(AnalysisRun.id.desc())
+                )
+            ).scalars().first()
+            if not canonical:
+                logger.warning(
+                    "merge: no canonical run; will only enqueue fresh analysis",
+                    extra={"event": "merge_skip", "pr_id": pull_request_id, "reason": "no_canonical"},
+                )
+                result["skip_reason"] = "no_canonical"
+            else:
+                result["promoted_run_id"] = canonical.id
+                diffs = (
+                    await session.execute(
+                        select(DocDiff).where(DocDiff.pr_analysis_run_id == pr_run.id)
+                    )
+                ).scalars().all()
+                canonical_docs = (
+                    await session.execute(
+                        select(GeneratedDoc).where(GeneratedDoc.run_id == canonical.id)
+                    )
+                ).scalars().all()
+                canonical_by_aid = {d.artifact_id: d for d in canonical_docs}
+                changed_docs: list[GeneratedDoc] = []
+
+                for diff in diffs:
+                    after_text = _extract_head_text(diff.side_by_side)
+                    if not after_text:
+                        continue
+                    doc = canonical_by_aid.get(diff.artifact_id)
+                    if doc is None:
+                        # Brand-new doc introduced by the PR. Insert into the
+                        # canonical run so the UI sees it immediately. The
+                        # follow-up fresh run will replace this with the
+                        # full, properly-categorised output of the
+                        # canonical pipeline.
+                        title = _title_from_doc_diff(diff, after_text)
+                        doc = GeneratedDoc(
+                            run_id=canonical.id,
+                            artifact_id=diff.artifact_id,
+                            category="updated",
+                            title=title,
+                            slug_path=diff.doc_path or f".aura/docs/{diff.artifact_id}.md",
+                            content_hash=hashlib.sha256(after_text.encode("utf-8")).hexdigest(),
+                            generated_sha=merge_commit_sha or "",
+                            last_verified_sha="",
+                            source_files=[],
+                            source_lines={},
+                            content_md=after_text,
+                        )
+                        session.add(doc)
+                        canonical_by_aid[diff.artifact_id] = doc
+                        changed_docs.append(doc)
+                        result["created_docs"] += 1
+                        continue
+                    if after_text == (doc.content_md or ""):
+                        continue
+                    doc.content_md = after_text
+                    doc.content_hash = hashlib.sha256(after_text.encode("utf-8")).hexdigest()
+                    changed_docs.append(doc)
+                    result["applied"] += 1
+
+                if changed_docs:
+                    try:
+                        embedder = QwenEmbedder()
+                        embed_result = await embedder.embed([d.content_md or "" for d in changed_docs])
+                        for d, vec in zip(changed_docs, embed_result.vectors):
+                            d.embedding = pack_vector(vec)
+                            d.embedding_dim = embed_result.dim
+                            d.embedding_model = embed_result.model
+                            result["embedded"] += 1
+                    except Exception:
+                        # Embedding refresh is best-effort. The follow-up
+                        # canonical run will recompute these correctly.
+                        logger.exception(
+                            "merge: embedding refresh failed (fresh run will fix)",
+                            extra={"event": "merge_embed_error", "pr_id": pull_request_id},
+                        )
+                    await session.commit()
+
+                logger.info(
+                    "merge: docs promoted",
+                    extra={
+                        "event": "merge_promoted",
+                        "pr_id": pull_request_id,
+                        "canonical_run_id": canonical.id,
+                        "applied": result["applied"],
+                        "created_docs": result["created_docs"],
+                        "embedded": result["embedded"],
+                    },
+                )
+
+    if repo_id_for_enqueue is not None:
+        try:
+            fresh_id = await enqueue_canonical_analysis(
+                repo_id=repo_id_for_enqueue, commit_sha=merge_commit_sha
+            )
+            result["fresh_run_id"] = fresh_id
+        except Exception:
+            logger.exception(
+                "merge: failed to enqueue fresh canonical analysis",
+                extra={"event": "merge_enqueue_error", "pr_id": pull_request_id},
+            )
+
+    return result
+
+
+def _title_from_doc_diff(diff, after_text: str) -> str:
+    """Best-effort title for a doc that didn't exist canonically yet.
+    Looks for a leading Markdown H1, falls back to the slug stem.
+    """
+    for line in (after_text or "").splitlines():
+        line = line.strip()
+        if line.startswith("# "):
+            return line[2:].strip() or diff.artifact_id
+    if diff.doc_path:
+        stem = diff.doc_path.rsplit("/", 1)[-1]
+        return stem.removesuffix(".md") or diff.artifact_id
+    return diff.artifact_id
 
 
 def _extract_head_text(side_by_side: dict | None) -> str:
